@@ -16,12 +16,10 @@ contract Fira {
 
     error MaturityTooSoon();
     error MaturityTooFar();
-    error MaturityExpired();
-    error MaturityNotInList();
-    error MaturityInPast();
-    error MaturityAlreadyExists();
+    error MaturityNotActive();
+    error MaturityActive();
     error InvalidHint();
-    error MaturityNotExpired();
+    error MaturityNotReached();
 
     //////////////////////////////////////////////////////////////
     ///                       Events                           ///
@@ -234,12 +232,13 @@ contract Fira {
     /// @notice Repay borrowed bonds at/after maturity.
     ///
     /// @dev Settlement at τ=0 (p(0)=1). Updates b and sPast incrementally (O(1)).
+    ///      Requires maturity to be expired first via expireMaturity().
     ///      Underflows if amount > position (Solidity 0.8+ automatic check).
     ///
     /// @param maturity Maturity timestamp (seconds).
     /// @param amount Amount to repay (native decimals).
     function repay(uint256 maturity, uint256 amount) external {
-        require(block.timestamp >= maturity, MaturityNotExpired());
+        require(!_isActive({maturity: maturity}), MaturityActive());
 
         uint256 amountWad = amount * DECIMAL_SCALE;
 
@@ -261,12 +260,12 @@ contract Fira {
         uint256 cashInWad = uint256(cashAmountSignedWad);
         uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
-        maturities[maturity].b -= amountWad;
+        maturities[maturity].b -= amountWad; // Reverts if maturity does not exist
         sPast -= int256(amountWad);
 
         // Token transfers
         CASH.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
-        BOND.burn({from: msg.sender, maturity: maturity, amount: amountWad});
+        BOND.mint({to: msg.sender, maturity: maturity, amount: amountWad});
 
         emit Repaid({user: msg.sender, maturity: maturity, amount: amount});
     }
@@ -274,12 +273,13 @@ contract Fira {
     /// @notice Redeem lent bonds at/after maturity.
     ///
     /// @dev Settlement at τ=0 (p(0)=1). Updates l and sPast incrementally (O(1)).
+    ///      Requires maturity to be expired first via expireMaturity().
     ///      Underflows if amount > position (Solidity 0.8+ automatic check).
     ///
     /// @param maturity Maturity timestamp (seconds).
     /// @param amount Amount to redeem (native decimals).
     function redeem(uint256 maturity, uint256 amount) external {
-        require(block.timestamp >= maturity, MaturityNotExpired());
+        require(!_isActive({maturity: maturity}), MaturityActive());
 
         uint256 amountWad = amount * DECIMAL_SCALE;
 
@@ -301,11 +301,11 @@ contract Fira {
         uint256 cashOutWad = uint256(-cashAmountSignedWad);
         uint256 cashOut = cashOutWad / DECIMAL_SCALE;
         yLiq -= cashOut;
-        maturities[maturity].l -= amountWad;
+        maturities[maturity].l -= amountWad; // Reverts if maturity does not exist
         sPast += int256(amountWad);
 
         // Token transfers
-        BOND.mint({to: msg.sender, maturity: maturity, amount: amountWad});
+        BOND.burn({from: msg.sender, maturity: maturity, amount: amountWad});
         CASH.transfer({to: msg.sender, amount: cashOut});
 
         emit Redeemed({user: msg.sender, maturity: maturity, amount: amount});
@@ -323,8 +323,7 @@ contract Fira {
     /// @param maturity Maturity timestamp to add
     /// @param hint Hint for insertion position (0 for auto-find or head insertion)
     function addMaturity(uint256 maturity, uint256 hint) external {
-        require(maturity > block.timestamp, MaturityInPast());
-        require(!_inList({maturity: maturity}), MaturityAlreadyExists());
+        require(!_isActive({maturity: maturity}), MaturityActive());
 
         // Empty list
         if (head == 0) {
@@ -344,8 +343,8 @@ contract Fira {
         }
 
         // Verify hint
-        require(_inList({maturity: hint}), InvalidHint());
         require(hint < maturity, InvalidHint());
+        require(_isActive({maturity: hint}), InvalidHint());
 
         uint256 nextNode = maturities[hint].next;
         require(nextNode == 0 || nextNode > maturity, InvalidHint());
@@ -369,13 +368,13 @@ contract Fira {
     ///
     /// @param maturity Maturity timestamp to expire
     function expireMaturity(uint256 maturity) external {
-        require(block.timestamp >= maturity, MaturityNotExpired());
-        require(_inList({maturity: maturity}), MaturityNotInList());
+        require(block.timestamp >= maturity, MaturityNotReached());
+        require(_isActive({maturity: maturity}), MaturityNotActive());
 
         MaturityNode storage node = maturities[maturity];
 
-        // 1. Roll net position into S_past
-        int256 net = int256(node.l) - int256(node.b);
+        // 1. Roll net position into S_past (b - l)
+        int256 net = int256(node.b) - int256(node.l);
         sPast += net;
 
         // 2. Remove from linked list (O(1))
@@ -431,18 +430,19 @@ contract Fira {
         tau = maturity - block.timestamp;
         require(tau >= tauMin, MaturityTooSoon());
         require(tau <= tauMax, MaturityTooFar());
-        require(_inList({maturity: maturity}), MaturityNotInList());
+        require(_isActive({maturity: maturity}), MaturityNotActive());
     }
 
-    /// @notice Check if a maturity exists in the linked list.
+    /// @notice Check if a maturity is in the active linked list.
     ///
-    /// @dev Returns true if maturity is in the list (head, tail, or has prev/next pointers).
-    ///      Does NOT check if maturity is expired - only checks list membership.
+    /// @dev Returns true if maturity is tracked in the list. Note that a maturity
+    ///      can be "active" (in the list) even if block.timestamp >= maturity.
+    ///      Use expireMaturity() to remove past-due maturities from the list.
     ///
     /// @param maturity Maturity timestamp (seconds).
     ///
-    /// @return True if maturity is in the list.
-    function _inList(uint256 maturity) internal view returns (bool) {
+    /// @return True if maturity is in the active list.
+    function _isActive(uint256 maturity) internal view returns (bool) {
         if (head == maturity || tail == maturity) return true;
 
         MaturityNode storage node = maturities[maturity];

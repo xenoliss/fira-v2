@@ -37,15 +37,15 @@ library NelsonSiegelLib {
 
         // casting to 'int256' is safe because tau < 100 years and lambda bounded by MAX_LAMBDA
         // forge-lint: disable-next-line(unsafe-typecast)
-        int256 tauOverLambda = FixedPointMathLib.sDivWad(int256(tau), int256(lambda));
-        int256 expNeg = FixedPointMathLib.expWad(-tauOverLambda);
+        int256 tauOverLambda = FixedPointMathLib.sDivWad({x: int256(tau), y: int256(lambda)});
+        int256 expNeg = FixedPointMathLib.expWad({x: -tauOverLambda});
 
         int256 f1 = tauOverLambda < sWad / 100
             ? sWad - tauOverLambda / 2
-            : FixedPointMathLib.sDivWad(sWad - expNeg, tauOverLambda);
+            : FixedPointMathLib.sDivWad({x: sWad - expNeg, y: tauOverLambda});
 
         int256 f2 = f1 - expNeg;
 
-        return beta0 + FixedPointMathLib.sMulWad(beta1, f1) + FixedPointMathLib.sMulWad(beta2, f2);
+        return beta0 + FixedPointMathLib.sMulWad({x: beta1, y: f1}) + FixedPointMathLib.sMulWad({x: beta2, y: f2});
     }
 }

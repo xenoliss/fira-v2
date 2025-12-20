@@ -58,7 +58,7 @@ contract BondToken is ERC1155 {
     ///
     /// @param minter The address authorized to mint/burn (typically the AMM).
     constructor(address minter) {
-        if (minter == address(0)) revert ZeroAddress();
+        require(minter != address(0), ZeroAddress());
         MINTER = minter;
     }
 
@@ -74,7 +74,7 @@ contract BondToken is ERC1155 {
 
     /// @dev Internal function to check minter authorization.
     function _checkMinter() internal view {
-        if (msg.sender != MINTER) revert Unauthorized();
+        require(msg.sender == MINTER, Unauthorized());
     }
 
     //////////////////////////////////////////////////////////////

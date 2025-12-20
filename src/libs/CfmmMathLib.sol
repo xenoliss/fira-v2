@@ -87,7 +87,10 @@ library CfmmMathLib {
             // Apply signed bond amount and solve invariant
             // bondAmountSigned > 0: borrow (x increases)
             // bondAmountSigned < 0: lend (x decreases)
-            uint256 xNew = uint256(int256(x) + bondAmountSigned);
+            int256 xNewSigned = int256(x) + bondAmountSigned;
+            require(xNewSigned > 0, InvariantViolated());
+            uint256 xNew = uint256(xNewSigned);
+
             yPrinNewWad = _solveInvariantForYPrin({C: C, K: K, xNew: xNew, alpha: alpha});
         }
 
