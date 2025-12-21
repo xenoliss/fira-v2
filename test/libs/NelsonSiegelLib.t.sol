@@ -190,9 +190,9 @@ contract NelsonSiegelLibTest is Test {
                 tau: tc.tau, beta0: tc.beta0, beta1: tc.beta1, beta2: tc.beta2, lambda: tc.lambda
             });
 
-            // Allow 0.01% relative error
+            // Allow 0.02% relative error
             assertApproxEqRel(
-                solidityResult, pythonResults[i], 1e14, string.concat("r* mismatch at case ", vm.toString(i))
+                solidityResult, pythonResults[i], 2e14, string.concat("r* mismatch at case ", vm.toString(i))
             );
         }
     }

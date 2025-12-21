@@ -2,10 +2,9 @@
 pragma solidity ^0.8.30;
 
 import {CfmmMathLib} from "../../src/libs/CfmmMathLib.sol";
-import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {LibString} from "solady/utils/LibString.sol";
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 
 /// @title CfmmMathLibTest - Unit tests for CFMM math library
 contract CfmmMathLibTest is Test {
@@ -27,8 +26,7 @@ contract CfmmMathLibTest is Test {
 
     // Initial state
     uint256 constant INITIAL_X = 1000e18; // 1000 WAD
-    uint256 constant INITIAL_Y_PRIN = 1000e18; // 1000 WAD
-    uint256 constant INITIAL_Y_LIQ = 1000e18; // 1000 WAD
+    uint256 constant INITIAL_Y = 1000e18; // 1000 WAD
 
     //////////////////////////////////////////////////////////////
     ///                       Helpers                          ///
@@ -59,19 +57,20 @@ contract CfmmMathLibTest is Test {
 
         int256 bondAmount = 100e18;
 
-        (uint256 XNew, int256 cashAmountSigned) = CfmmMathLib.computeSwap({
+        (uint256 XNew, uint256 yNewWad) = CfmmMathLib.computeSwap({
             tau: 0,
             bondAmountSigned: -bondAmount, // lend direction (pool receives cash)
             X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
+            yWad: INITIAL_Y,
             params: params
         });
 
         // At tau=0: alpha=1, K=1, price=1
         // Linear invariant: x + y = C
         // Pool receives cash = bondAmount (since price = 1)
-        assertApproxEqRel(cashAmountSigned, bondAmount, 1e14, "Cash should equal bond amount at tau=0");
+        // yNew - y = cash received
+        int256 cashReceived = int256(yNewWad) - int256(INITIAL_Y);
+        assertApproxEqRel(cashReceived, bondAmount, 1e14, "Cash should equal bond amount at tau=0");
         assertTrue(XNew > 0, "XNew should be positive");
     }
 
@@ -85,17 +84,16 @@ contract CfmmMathLibTest is Test {
 
         int256 bondAmount = 100e18;
 
-        (uint256 XNew, int256 cashAmountSigned) = CfmmMathLib.computeSwap({
+        (uint256 XNew, uint256 yNewWad) = CfmmMathLib.computeSwap({
             tau: tau,
             bondAmountSigned: bondAmount, // positive = borrow
             X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
+            yWad: INITIAL_Y,
             params: params
         });
 
         assertGt(XNew, INITIAL_X, "X should increase on borrow");
-        assertLt(cashAmountSigned, 0, "Pool pays cash on borrow (negative)");
+        assertLt(yNewWad, INITIAL_Y, "y should decrease on borrow (cash out)");
     }
 
     function test_computeSwap_lend_XDecreases() public pure {
@@ -104,17 +102,16 @@ contract CfmmMathLibTest is Test {
 
         int256 bondAmount = 100e18;
 
-        (uint256 XNew, int256 cashAmountSigned) = CfmmMathLib.computeSwap({
+        (uint256 XNew, uint256 yNewWad) = CfmmMathLib.computeSwap({
             tau: tau,
             bondAmountSigned: -bondAmount, // negative = lend
             X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
+            yWad: INITIAL_Y,
             params: params
         });
 
         assertLt(XNew, INITIAL_X, "X should decrease on lend");
-        assertGt(cashAmountSigned, 0, "Pool receives cash on lend (positive)");
+        assertGt(yNewWad, INITIAL_Y, "y should increase on lend (cash in)");
     }
 
     //////////////////////////////////////////////////////////////
@@ -139,12 +136,7 @@ contract CfmmMathLibTest is Test {
 
         vm.expectRevert(CfmmMathLib.RateOutOfBounds.selector);
         CfmmMathLib.computeSwap({
-            tau: SECONDS_PER_YEAR,
-            bondAmountSigned: largeLend,
-            X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
-            params: params
+            tau: SECONDS_PER_YEAR, bondAmountSigned: largeLend, X: INITIAL_X, yWad: INITIAL_Y, params: params
         });
     }
 
@@ -160,40 +152,7 @@ contract CfmmMathLibTest is Test {
 
         vm.expectRevert(CfmmMathLib.RateOutOfBounds.selector);
         CfmmMathLib.computeSwap({
-            tau: SECONDS_PER_YEAR,
-            bondAmountSigned: largeBorrow,
-            X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
-            params: params
-        });
-    }
-
-    //////////////////////////////////////////////////////////////
-    ///             Principal Payability Tests                 ///
-    //////////////////////////////////////////////////////////////
-
-    /// forge-config: default.allow_internal_expect_revert = true
-    function testRevert_computeSwap_insufficientLiquidity() public {
-        CfmmMathLib.CfmmParams memory params = CfmmMathLib.CfmmParams({
-            beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA, kappa: KAPPA, psiMin: 0, psiMax: type(uint256).max
-        });
-
-        // yLiq is very low but yPrin (= yLiq + yVault) is high
-        uint256 lowYLiq = 10e18; // only 10 WAD liquid
-        uint256 highYPrin = 1000e18; // 1000 WAD total principal
-
-        // Try to borrow more than available liquidity
-        int256 largeBorrow = 500e18;
-
-        vm.expectRevert(CfmmMathLib.InsufficientLiquidPrincipal.selector);
-        CfmmMathLib.computeSwap({
-            tau: SECONDS_PER_YEAR,
-            bondAmountSigned: largeBorrow,
-            X: 1000e18,
-            yPrinWad: highYPrin,
-            yLiqWad: lowYLiq,
-            params: params
+            tau: SECONDS_PER_YEAR, bondAmountSigned: largeBorrow, X: INITIAL_X, yWad: INITIAL_Y, params: params
         });
     }
 
@@ -207,12 +166,7 @@ contract CfmmMathLibTest is Test {
 
         vm.expectRevert(CfmmMathLib.ZeroAmount.selector);
         CfmmMathLib.computeSwap({
-            tau: SECONDS_PER_YEAR,
-            bondAmountSigned: 0,
-            X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
-            params: params
+            tau: SECONDS_PER_YEAR, bondAmountSigned: 0, X: INITIAL_X, yWad: INITIAL_Y, params: params
         });
     }
 
@@ -228,27 +182,18 @@ contract CfmmMathLibTest is Test {
         int256 bondAmount = 100e18;
 
         // Lend at 1 year
-        (, int256 cash1y) = CfmmMathLib.computeSwap({
-            tau: SECONDS_PER_YEAR,
-            bondAmountSigned: -bondAmount,
-            X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
-            params: params
+        (, uint256 yNew1y) = CfmmMathLib.computeSwap({
+            tau: SECONDS_PER_YEAR, bondAmountSigned: -bondAmount, X: INITIAL_X, yWad: INITIAL_Y, params: params
         });
 
         // Lend at 5 years
-        (, int256 cash5y) = CfmmMathLib.computeSwap({
-            tau: 5 * SECONDS_PER_YEAR,
-            bondAmountSigned: -bondAmount,
-            X: INITIAL_X,
-            yPrinWad: INITIAL_Y_PRIN,
-            yLiqWad: INITIAL_Y_LIQ,
-            params: params
+        (, uint256 yNew5y) = CfmmMathLib.computeSwap({
+            tau: 5 * SECONDS_PER_YEAR, bondAmountSigned: -bondAmount, X: INITIAL_X, yWad: INITIAL_Y, params: params
         });
 
         // Longer maturity = more discount = less cash for same bond amount
-        assertLt(cash5y, cash1y, "5y lend should receive less cash than 1y lend");
+        // cash = yNew - y, so smaller yNew means less cash
+        assertLt(yNew5y, yNew1y, "5y lend should receive less cash than 1y lend");
     }
 
     //////////////////////////////////////////////////////////////
@@ -257,24 +202,22 @@ contract CfmmMathLibTest is Test {
 
     uint256 constant BATCH_SIZE = 50;
 
-    // Python error codes (returned in cashAmountSigned when XNew == type(uint256).max)
-    int256 constant ERROR_INVARIANT_VIOLATED = 1;
-    int256 constant ERROR_RATE_OUT_OF_BOUNDS = 2;
-    int256 constant ERROR_INSUFFICIENT_LIQUIDITY = 3;
+    // Python error codes (returned in yNewWad when XNew == type(uint256).max)
+    uint256 constant ERROR_INVARIANT_VIOLATED = 1;
+    uint256 constant ERROR_RATE_OUT_OF_BOUNDS = 2;
 
     struct SwapTestCase {
         uint256 tau;
         int256 bondAmountSigned;
         uint256 X;
-        uint256 yPrin;
-        uint256 yLiq;
+        uint256 y;
         uint256 psiMin;
         uint256 psiMax;
     }
 
     struct SwapResult {
         uint256 XNew;
-        int256 cashAmountSigned;
+        uint256 yNewWad;
     }
 
     /// @notice Batched differential fuzz test against Python
@@ -301,35 +244,23 @@ contract CfmmMathLibTest is Test {
 
             // Python encountered an error - verify Solidity also reverts with same error
             if (expected.XNew == type(uint256).max) {
-                if (expected.cashAmountSigned == ERROR_INVARIANT_VIOLATED) {
+                if (expected.yNewWad == ERROR_INVARIANT_VIOLATED) {
                     vm.expectRevert(CfmmMathLib.InvariantViolated.selector);
-                } else if (expected.cashAmountSigned == ERROR_RATE_OUT_OF_BOUNDS) {
+                } else if (expected.yNewWad == ERROR_RATE_OUT_OF_BOUNDS) {
                     vm.expectRevert(CfmmMathLib.RateOutOfBounds.selector);
-                } else if (expected.cashAmountSigned == ERROR_INSUFFICIENT_LIQUIDITY) {
-                    vm.expectRevert(CfmmMathLib.InsufficientLiquidPrincipal.selector);
                 } else {
-                    revert(string.concat("Unknown Python error code: ", vm.toString(expected.cashAmountSigned)));
+                    revert(string.concat("Unknown Python error code: ", vm.toString(expected.yNewWad)));
                 }
 
                 CfmmMathLib.computeSwap({
-                    tau: tc.tau,
-                    bondAmountSigned: tc.bondAmountSigned,
-                    X: tc.X,
-                    yPrinWad: tc.yPrin,
-                    yLiqWad: tc.yLiq,
-                    params: params
+                    tau: tc.tau, bondAmountSigned: tc.bondAmountSigned, X: tc.X, yWad: tc.y, params: params
                 });
                 continue;
             }
 
             // Python succeeded - compare results
-            (uint256 solidityXNew, int256 solidityCash) = CfmmMathLib.computeSwap({
-                tau: tc.tau,
-                bondAmountSigned: tc.bondAmountSigned,
-                X: tc.X,
-                yPrinWad: tc.yPrin,
-                yLiqWad: tc.yLiq,
-                params: params
+            (uint256 solidityXNew, uint256 solidityYNew) = CfmmMathLib.computeSwap({
+                tau: tc.tau, bondAmountSigned: tc.bondAmountSigned, X: tc.X, yWad: tc.y, params: params
             });
 
             // Allow 0.1% relative error for floating-point vs fixed-point differences
@@ -340,10 +271,10 @@ contract CfmmMathLibTest is Test {
                 string.concat("XNew mismatch at case ", vm.toString(i))
             );
             assertApproxEqRel(
-                solidityCash,
-                expected.cashAmountSigned,
+                solidityYNew,
+                expected.yNewWad,
                 1e15, // 0.1%
-                string.concat("Cash mismatch at case ", vm.toString(i))
+                string.concat("yNew mismatch at case ", vm.toString(i))
             );
         }
     }
@@ -358,22 +289,19 @@ contract CfmmMathLibTest is Test {
             // tau: 1 day to 10 years
             uint256 tau = bound(uint256(keccak256(abi.encode(r, "tau"))), 1 days, 10 * SECONDS_PER_YEAR);
 
-            // yPrin: 1k to 1B WAD
-            uint256 yPrin = bound(uint256(keccak256(abi.encode(r, "yPrin"))), 1_000e18, 1_000_000_000e18);
+            // y: 1k to 1B WAD
+            uint256 y = bound(uint256(keccak256(abi.encode(r, "y"))), 1_000e18, 1_000_000_000e18);
 
-            // X: 10% to 1000% of yPrin (psi from 0.1 to 10)
-            uint256 X = bound(uint256(keccak256(abi.encode(r, "X"))), yPrin / 10, yPrin * 10);
+            // X: 10% to 1000% of y (psi from 0.1 to 10)
+            uint256 X = bound(uint256(keccak256(abi.encode(r, "X"))), y / 10, y * 10);
 
-            // bond amount: -50% to +50% of yPrin
-            int256 maxBond = int256(yPrin / 2);
+            // bond amount: -50% to +50% of y
+            int256 maxBond = int256(y / 2);
             int256 bondAmountSigned =
                 int256(bound(uint256(keccak256(abi.encode(r, "bond"))), 0, uint256(maxBond * 2))) - maxBond;
 
             // Skip zero amounts
             if (bondAmountSigned == 0) bondAmountSigned = 1e18;
-
-            // yLiq: 10% to 100% of yPrin (sometimes less than full principal)
-            uint256 yLiq = bound(uint256(keccak256(abi.encode(r, "yLiq"))), yPrin / 10, yPrin);
 
             // psiMin/psiMax: generate bounds that sometimes constrain the result
             // 50% of cases: wide bounds (0.1 to 10) - unlikely to trigger error
@@ -387,7 +315,7 @@ contract CfmmMathLibTest is Test {
                 psiMax = 10e18;
             } else {
                 // Tight bounds around current psi (±20%)
-                uint256 currentPsi = (X * 1e18) / yPrin;
+                uint256 currentPsi = (X * 1e18) / y;
                 psiMin = (currentPsi * 80) / 100;
                 psiMax = (currentPsi * 120) / 100;
                 // Ensure valid bounds
@@ -395,13 +323,7 @@ contract CfmmMathLibTest is Test {
             }
 
             cases[i] = SwapTestCase({
-                tau: tau,
-                bondAmountSigned: bondAmountSigned,
-                X: X,
-                yPrin: yPrin,
-                yLiq: yLiq,
-                psiMin: psiMin,
-                psiMax: psiMax
+                tau: tau, bondAmountSigned: bondAmountSigned, X: X, y: y, psiMin: psiMin, psiMax: psiMax
             });
         }
     }
@@ -424,11 +346,8 @@ contract CfmmMathLibTest is Test {
                 '"X":',
                 vm.toString(cases[i].X),
                 ",",
-                '"yPrin":',
-                vm.toString(cases[i].yPrin),
-                ",",
-                '"yLiq":',
-                vm.toString(cases[i].yLiq),
+                '"y":',
+                vm.toString(cases[i].y),
                 ",",
                 '"psiMin":',
                 vm.toString(cases[i].psiMin),
@@ -454,7 +373,6 @@ contract CfmmMathLibTest is Test {
         bytes memory result = vm.ffi(inputs);
 
         // Decode ABI-encoded results
-        // Layout: offset (32) + length (32) + N * (XNew (32) + cash (32))
         SwapResult[] memory results = abi.decode(result, (SwapResult[]));
         return results;
     }

@@ -20,6 +20,7 @@ contract Fira {
     error MaturityActive();
     error InvalidHint();
     error MaturityNotReached();
+    error InsufficientYLiq();
 
     //////////////////////////////////////////////////////////////
     ///                       Events                           ///
@@ -163,18 +164,16 @@ contract Fira {
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
         uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
-        (uint256 XNew, int256 cashAmountSignedWad) = CfmmMathLib.computeSwap({
-            tau: tau,
-            bondAmountSigned: int256(bondAmount),
-            X: X,
-            yPrinWad: yPrinWad,
-            yLiqWad: yLiqWad,
-            params: _getCfmmParams()
+        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
+            tau: tau, bondAmountSigned: int256(bondAmount), X: X, yWad: yPrinWad, params: _getCfmmParams()
         });
+
+        // Liquidity check (borrow = cash goes out)
+        uint256 cashOutWad = yPrinWad - yPrinNewWad;
+        require(yLiqWad >= cashOutWad, InsufficientYLiq());
 
         // State updates
         X = XNew;
-        uint256 cashOutWad = uint256(-cashAmountSignedWad);
         uint256 cashOut = cashOutWad / DECIMAL_SCALE;
         yLiq -= cashOut;
         maturities[maturity].b += bondAmount;
@@ -200,20 +199,14 @@ contract Fira {
 
         // Execute pure CFMM swap
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
-        uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
-        (uint256 XNew, int256 cashAmountSignedWad) = CfmmMathLib.computeSwap({
-            tau: tau,
-            bondAmountSigned: -int256(bondAmount),
-            X: X,
-            yPrinWad: yPrinWad,
-            yLiqWad: yLiqWad,
-            params: _getCfmmParams()
+        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
+            tau: tau, bondAmountSigned: -int256(bondAmount), X: X, yWad: yPrinWad, params: _getCfmmParams()
         });
 
-        // State updates
+        // State updates (lend = cash comes in, no liquidity check needed)
         X = XNew;
-        uint256 cashInWad = uint256(cashAmountSignedWad);
+        uint256 cashInWad = yPrinNewWad - yPrinWad;
         uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
         maturities[maturity].l += bondAmount;
@@ -244,20 +237,14 @@ contract Fira {
 
         // Execute pure CFMM swap (settlement at tau=0)
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
-        uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
-        (uint256 XNew, int256 cashAmountSignedWad) = CfmmMathLib.computeSwap({
-            tau: 0,
-            bondAmountSigned: -int256(amountWad),
-            X: X,
-            yPrinWad: yPrinWad,
-            yLiqWad: yLiqWad,
-            params: _getCfmmParams()
+        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
+            tau: 0, bondAmountSigned: -int256(amountWad), X: X, yWad: yPrinWad, params: _getCfmmParams()
         });
 
-        // State updates
+        // State updates (repay = cash comes in, no liquidity check needed)
         X = XNew;
-        uint256 cashInWad = uint256(cashAmountSignedWad);
+        uint256 cashInWad = yPrinNewWad - yPrinWad;
         uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
         maturities[maturity].b -= amountWad; // Reverts if maturity does not exist
@@ -287,18 +274,16 @@ contract Fira {
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
         uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
-        (uint256 XNew, int256 cashAmountSignedWad) = CfmmMathLib.computeSwap({
-            tau: 0,
-            bondAmountSigned: int256(amountWad),
-            X: X,
-            yPrinWad: yPrinWad,
-            yLiqWad: yLiqWad,
-            params: _getCfmmParams()
+        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
+            tau: 0, bondAmountSigned: int256(amountWad), X: X, yWad: yPrinWad, params: _getCfmmParams()
         });
+
+        // Liquidity check (redeem = cash goes out)
+        uint256 cashOutWad = yPrinWad - yPrinNewWad;
+        require(yLiqWad >= cashOutWad, InsufficientYLiq());
 
         // State updates
         X = XNew;
-        uint256 cashOutWad = uint256(-cashAmountSignedWad);
         uint256 cashOut = cashOutWad / DECIMAL_SCALE;
         yLiq -= cashOut;
         maturities[maturity].l -= amountWad; // Reverts if maturity does not exist
@@ -363,7 +348,7 @@ contract Fira {
 
     /// @notice Expire a maturity by removing it from the active list
     ///
-    /// @dev Moves (l_k - b_k) into S_past aggregate (O(1))
+    /// @dev Moves (b_k - l_k) into S_past aggregate (O(1))
     ///      Removes from linked list but keeps b and l in mapping for settlement
     ///
     /// @param maturity Maturity timestamp to expire
