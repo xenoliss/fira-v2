@@ -2,276 +2,247 @@
 pragma solidity ^0.8.30;
 
 import {NelsonSiegelLib} from "../../src/libs/NelsonSiegelLib.sol";
-import {LibString} from "solady/utils/LibString.sol";
 
-import {Test, stdMath} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 
-/// @title NelsonSiegelLibTest - Unit tests for Nelson-Siegel curve library
 contract NelsonSiegelLibTest is Test {
-    //////////////////////////////////////////////////////////////
-    ///                       Constants                        ///
-    //////////////////////////////////////////////////////////////
-
-    uint256 constant SECONDS_PER_YEAR = 365 days;
-    int256 constant WAD = 1e18;
-
-    // Default Nelson-Siegel parameters
-    int256 constant BETA0 = 0.05e18; // 5% long-term rate
-    int256 constant BETA1 = -0.02e18; // -2% short-term slope (normal curve)
-    int256 constant BETA2 = 0.01e18; // 1% curvature
-    uint256 constant LAMBDA = 2 * SECONDS_PER_YEAR; // 2 year decay
+    uint256 constant YEAR = 365 days;
 
     //////////////////////////////////////////////////////////////
-    ///                   tau = 0 Tests                        ///
+    ///                    tau=0 (Instant Rate)                ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev At τ=0, f1=1, f2=0 so r* = β0 + β1
-    function test_computeRStar_tau0_returnsBeta0PlusBeta1() public pure {
-        // When tau = 0: f1(0) = 1, f2(0) = 0 -> r* = beta0 + beta1
-        int256 result = NelsonSiegelLib.computeRStar({tau: 0, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA});
-
-        assertEq(result, BETA0 + BETA1, "tau=0 should return beta0 + beta1");
-        assertEq(result, 0.03e18, "Expected 5% - 2% = 3%");
+    /// @dev When τ=0, the rate should equal β₀ + β₁ (instant rate).
+    ///      At this limit, f₁→1 and f₂→0, so only β₀ and β₁ contribute.
+    function test_computeRStar_tauZero_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        _assertComputeRStar({tau: 0, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.030000000000000002e18});
+        _assertComputeRStar({tau: 0, b0: 0.10e18, b1: 0, b2: 0, lam: YEAR, expected: 0.10e18});
+        _assertComputeRStar({tau: 0, b0: 0.03e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 0, b0: 0.08e18, b1: -0.05e18, b2: 0.03e18, lam: 3 * YEAR, expected: 0.03e18});
+        _assertComputeRStar({tau: 0, b0: 0.02e18, b1: 0.01e18, b2: 0, lam: YEAR, expected: 0.03e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///                   Flat Curve Tests                     ///
+    ///                Flat Curve (β₁=β₂=0)                    ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Flat curve (β1=β2=0) returns β0 for all maturities
-    function test_computeRStar_flatCurve_returnsBeta0() public pure {
-        // Flat curve: beta1 = beta2 = 0 -> r* = beta0 for all maturities
-        int256 beta0 = 0.03e18; // 3%
-
-        int256 result1y =
-            NelsonSiegelLib.computeRStar({tau: SECONDS_PER_YEAR, beta0: beta0, beta1: 0, beta2: 0, lambda: LAMBDA});
-
-        int256 result5y =
-            NelsonSiegelLib.computeRStar({tau: 5 * SECONDS_PER_YEAR, beta0: beta0, beta1: 0, beta2: 0, lambda: LAMBDA});
-
-        assertEq(result1y, beta0, "1y flat curve should return beta0");
-        assertEq(result5y, beta0, "5y flat curve should return beta0");
+    /// @dev When β₁=β₂=0, the rate should be flat at β₀ for all maturities.
+    ///      Only the level parameter β₀ remains, independent of τ.
+    function test_computeRStar_flatCurve_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: 0, b2: 0, lam: 2 * YEAR, expected: 0.05e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///                Normal Curve Tests                      ///
+    ///              Normal Curve (β₁ < 0)                     ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Normal curve (β1<0): short rates < long rates
-    function test_computeRStar_normalCurve_increasesWithTau() public pure {
-        // Normal upward-sloping curve: beta1 < 0
-        // Short rates lower than long rates
-
-        int256 result6m = NelsonSiegelLib.computeRStar({
-            tau: SECONDS_PER_YEAR / 2, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA
-        });
-
-        int256 result1y = NelsonSiegelLib.computeRStar({
-            tau: SECONDS_PER_YEAR, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA
-        });
-
-        int256 result5y = NelsonSiegelLib.computeRStar({
-            tau: 5 * SECONDS_PER_YEAR, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA
-        });
-
-        // With negative beta1, rates should increase with maturity
-        assertLt(result6m, result1y, "6m rate should be less than 1y rate");
-        assertLt(result1y, result5y, "1y rate should be less than 5y rate");
+    /// @dev When β₁ < 0, the curve should be upward-sloping (short rates < long rates).
+    ///      The rate starts at β₀+β₁ and rises toward β₀ as τ increases.
+    function test_computeRStar_normalCurve_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        // beta0 = 3%
+        _assertComputeRStar({tau: 1 days, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.010020535440394928e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.010143224451052816e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.010605322388505369e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.011770184129429366e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.013355782761582533e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.016065306597126332e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.02e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.025507490008256608e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.027946096424007316e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.03e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.029333330478245007e18});
+        // beta0 = 5%
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.030020535440394933e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03014322445105282e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03060532238850537e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03177018412942937e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.033355782761582534e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03606530659712633e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04550749000825661e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04794609642400732e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04933333047824501e18});
+        // beta0 = 8%
+        _assertComputeRStar({tau: 1 days, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.06002053544039493e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.060143224451052815e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.06060532238850538e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.061770184129429376e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.06335578276158253e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.06606530659712634e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.07e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.07550749000825661e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.07794609642400732e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.08e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.079333330478245e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///               Inverted Curve Tests                     ///
+    ///              Inverted Curve (β₁ > 0)                   ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Inverted curve (β1>0): short rates > long rates
-    function test_computeRStar_invertedCurve_decreasesWithTau() public pure {
-        // Inverted curve: beta1 > 0
-        // Short rates higher than long rates
-        int256 beta1Positive = 0.02e18;
-
-        int256 result6m = NelsonSiegelLib.computeRStar({
-            tau: SECONDS_PER_YEAR / 2,
-            beta0: BETA0,
-            beta1: beta1Positive,
-            beta2: -0.01e18,
-            lambda: SECONDS_PER_YEAR // 1 year decay
-        });
-
-        int256 result5y = NelsonSiegelLib.computeRStar({
-            tau: 5 * SECONDS_PER_YEAR, beta0: BETA0, beta1: beta1Positive, beta2: -0.01e18, lambda: SECONDS_PER_YEAR
-        });
-
-        // With positive beta1, short rates should be higher
-        assertGt(result6m, result5y, "6m rate should be greater than 5y rate (inverted)");
+    /// @dev When β₁ > 0, the curve should be downward-sloping (short rates > long rates).
+    ///      The rate starts at β₀+β₁ and falls toward β₀ as τ increases.
+    function test_computeRStar_invertedCurve_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        // beta1 = 1%
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05997264023596859e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.059810046472287264e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05921095293343955e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05779334390986866e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.056073620929748685e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05367879441171443e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05135335283236613e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.050067379469990854e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05000045399929763e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: 0.01e18, b2: -0.01e18, lam: YEAR, expected: 0.05000000000000094e18});
+        // beta1 = 2%
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.0699589541074322e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.06971476613159455e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.06881102557659172e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.06664421723841747e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.06394795258162633e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.060000000000000005e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.05567667641618307e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.05205390357599268e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.051000408599367865e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: 0.02e18, b2: -0.01e18, lam: YEAR, expected: 0.05033333333333424e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///                Convergence Tests                       ///
+    ///                  Curvature (β₂ ≠ 0)                    ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev As τ→∞, r* converges to β0 (f1, f2 → 0)
-    function test_computeRStar_largeTau_approachesBeta0() public pure {
-        // As tau -> infinity: f1(tau) -> 0, f2(tau) -> 0 -> r* -> beta0
-
-        int256 result10y = NelsonSiegelLib.computeRStar({
-            tau: 10 * SECONDS_PER_YEAR, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA
-        });
-
-        int256 result30y = NelsonSiegelLib.computeRStar({
-            tau: 30 * SECONDS_PER_YEAR, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA
-        });
-
-        // 30y should be closer to beta0 than 10y
-        uint256 diff10y = stdMath.abs(result10y - BETA0);
-        uint256 diff30y = stdMath.abs(result30y - BETA0);
-
-        assertLt(diff30y, diff10y, "30y should be closer to beta0 than 10y");
-
-        // 30y should be very close to beta0 (within 2%)
-        assertApproxEqRel(result30y, BETA0, 0.02e18, "30y should be ~beta0");
+    /// @dev When β₂ ≠ 0, the curve should exhibit a hump or trough at medium maturities.
+    ///      Positive β₂ creates a hump, negative β₂ creates a trough.
+    function test_computeRStar_curvature_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        // beta2 = 2%
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05001368612639591e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05009527961154654e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.050399871384959764e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05114766456882156e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.052115058837360326e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.053608160417242e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05528482235314231e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05570162003853084e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.05383828927202195e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: 0, b2: 0.02e18, lam: 2 * YEAR, expected: 0.051333326807417166e18});
+        // beta2 = 3%
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05002052918959386e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05014291941731981e18});
+        _assertComputeRStar({tau: 30 days, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05059980707743965e18});
+        _assertComputeRStar({tau: 91 days, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.051721496853232345e18});
+        _assertComputeRStar({tau: 182 days, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05317258825604049e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.055412240625862995e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05792723352971346e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.058552430057796256e18});
+        _assertComputeRStar({tau: 10 * YEAR, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.05575743390803292e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: 0, b2: 0.03e18, lam: 2 * YEAR, expected: 0.051999990211125745e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///                    Curvature Tests                     ///
+    ///                   Lambda Variations                    ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Positive β2 creates hump: mid-term rates > short & long rates
-    function test_computeRStar_positiveBeta2_createsHump() public pure {
-        // Positive beta2 creates a hump in the middle of the curve
-        int256 beta2Positive = 0.03e18;
-
-        int256 resultShort = NelsonSiegelLib.computeRStar({
-            tau: SECONDS_PER_YEAR / 4, // 3 months
-            beta0: BETA0,
-            beta1: 0, // no slope
-            beta2: beta2Positive,
-            lambda: LAMBDA
-        });
-
-        int256 resultMid = NelsonSiegelLib.computeRStar({
-            tau: 2 * SECONDS_PER_YEAR, // 2 years (near lambda)
-            beta0: BETA0,
-            beta1: 0,
-            beta2: beta2Positive,
-            lambda: LAMBDA
-        });
-
-        int256 resultLong = NelsonSiegelLib.computeRStar({
-            tau: 10 * SECONDS_PER_YEAR, // 10 years
-            beta0: BETA0,
-            beta1: 0,
-            beta2: beta2Positive,
-            lambda: LAMBDA
-        });
-
-        // Middle maturity should have highest rate (hump)
-        assertGt(resultMid, resultShort, "Mid should be higher than short");
-        assertGt(resultMid, resultLong, "Mid should be higher than long");
+    /// @dev The rate should converge to β₀ faster when λ is small.
+    ///      Large λ extends the influence of β₁ and β₂ to longer maturities.
+    function test_computeRStar_lambdaVariations_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR / 2, expected: 0.04432332358381694e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR / 2, expected: 0.0473626327083345e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR / 2, expected: 0.04899959140063214e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR, expected: 0.04e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR, expected: 0.04432332358381694e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: YEAR, expected: 0.04794609642400732e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03606530659712633e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04550749000825661e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 3 * YEAR, expected: 0.03433062621147579e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 3 * YEAR, expected: 0.03756708559516296e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 3 * YEAR, expected: 0.043244497588649754e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 5 * YEAR, expected: 0.032749230123119276e18});
+        _assertComputeRStar({tau: 2 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 5 * YEAR, expected: 0.03505480069053459e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 5 * YEAR, expected: 0.04e18});
+        // forgefmt: disable-end
     }
 
     //////////////////////////////////////////////////////////////
-    ///        Differential Fuzz Test (vs Python)              ///
+    ///               Large τ (Asymptotic Behavior)            ///
     //////////////////////////////////////////////////////////////
 
-    uint256 constant BATCH_SIZE = 50;
-
-    struct NsTestCase {
-        uint256 tau; // seconds
-        int256 beta0;
-        int256 beta1;
-        int256 beta2;
-        uint256 lambda; // seconds
+    /// @dev When τ is very large, the rate should converge toward β₀.
+    ///      As τ→∞, f₁→0 and f₂→0, leaving only the long-rate parameter.
+    function test_computeRStar_largeTau_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        _assertComputeRStar({tau: 20 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04899959140063214e18});
+        _assertComputeRStar({tau: 30 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.04933333047824501e18});
+        _assertComputeRStar({tau: 50 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.049599999999866674e18});
+        _assertComputeRStar({tau: 100 * YEAR, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.049800000000000004e18});
+        // forgefmt: disable-end
     }
 
-    /// @dev Differential test: Solidity results match Python reference implementation
-    function testFuzz_computeRStar_matchesPython(uint256 seed) public {
-        NsTestCase[] memory cases = _generateTestCases(seed);
-        int256[] memory pythonResults = _callPython(cases);
+    //////////////////////////////////////////////////////////////
+    ///         Small τ/λ Ratio (Taylor Approximation)        ///
+    //////////////////////////////////////////////////////////////
 
-        // Compare each case against Solidity implementation
-        for (uint256 i = 0; i < BATCH_SIZE; i++) {
-            NsTestCase memory tc = cases[i];
-
-            int256 solidityResult = NelsonSiegelLib.computeRStar({
-                tau: tc.tau, beta0: tc.beta0, beta1: tc.beta1, beta2: tc.beta2, lambda: tc.lambda
-            });
-
-            // Allow 0.02% relative error
-            assertApproxEqRel(
-                solidityResult, pythonResults[i], 2e14, string.concat("r* mismatch at case ", vm.toString(i))
-            );
-        }
+    /// @dev Tests the Taylor approximation branch when τ/λ < 0.01.
+    ///      When τ/λ is small, f₁ ≈ 1 - (τ/λ)/2 instead of full exp.
+    function test_computeRStar_smallTauLambdaRatio_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        // λ=2yr: τ < 7.3 days triggers Taylor branch
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.030020535440394933e18});
+        _assertComputeRStar({tau: 3 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03006153138858853e18});
+        _assertComputeRStar({tau: 7 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 2 * YEAR, expected: 0.03014322445105282e18});
+        // λ=5yr: τ < 18.25 days triggers Taylor branch
+        _assertComputeRStar({tau: 1 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 5 * YEAR, expected: 0.0300082171767977e18});
+        _assertComputeRStar({tau: 3 days, b0: 0.05e18, b1: -0.02e18, b2: 0.01e18, lam: 5 * YEAR, expected: 0.03002463952886016e18});
+        // forgefmt: disable-end
     }
 
-    /// @notice Generate test cases from seed
-    function _generateTestCases(uint256 seed) internal pure returns (NsTestCase[] memory cases) {
-        cases = new NsTestCase[](BATCH_SIZE);
+    //////////////////////////////////////////////////////////////
+    ///                     Negative Rates                     ///
+    //////////////////////////////////////////////////////////////
 
-        for (uint256 i = 0; i < BATCH_SIZE; i++) {
-            uint256 r = uint256(keccak256(abi.encode(seed, i)));
-
-            // tau: 0 to 30 years (in seconds)
-            uint256 tau = bound(uint256(keccak256(abi.encode(r, "tau"))), 0, 30 * SECONDS_PER_YEAR);
-
-            // beta0: 1% to 10% (WAD)
-            int256 beta0 = int256(bound(uint256(keccak256(abi.encode(r, "b0"))), 0.01e18, 0.1e18));
-
-            // beta1: -5% to +5% (WAD)
-            int256 beta1 = int256(bound(uint256(keccak256(abi.encode(r, "b1"))), 0, 0.1e18)) - 0.05e18;
-
-            // beta2: -3% to +3% (WAD)
-            int256 beta2 = int256(bound(uint256(keccak256(abi.encode(r, "b2"))), 0, 0.06e18)) - 0.03e18;
-
-            // lambda: 0.5 to 5 years (in seconds)
-            uint256 lambda = bound(uint256(keccak256(abi.encode(r, "lam"))), SECONDS_PER_YEAR / 2, 5 * SECONDS_PER_YEAR);
-
-            cases[i] = NsTestCase({tau: tau, beta0: beta0, beta1: beta1, beta2: beta2, lambda: lambda});
-        }
+    /// @dev Tests negative rate scenarios (β₀ < 0 or β₀ + β₁ < 0).
+    ///      The library should handle negative betas correctly.
+    function test_computeRStar_negativeRates_matchesPythonOutput() public pure {
+        // forgefmt: disable-start
+        // β₀ < 0 (negative long rate)
+        _assertComputeRStar({tau: 0, b0: -0.01e18, b1: 0.02e18, b2: 0, lam: 2 * YEAR, expected: 0.01e18});
+        _assertComputeRStar({tau: YEAR, b0: -0.01e18, b1: 0.02e18, b2: 0, lam: 2 * YEAR, expected: 0.005738773611494665e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: -0.01e18, b1: 0.02e18, b2: 0, lam: 2 * YEAR, expected: -0.002656679988991191e18});
+        // β₀ + β₁ < 0 (negative instant rate)
+        _assertComputeRStar({tau: 0, b0: 0.01e18, b1: -0.03e18, b2: 0, lam: 2 * YEAR, expected: -0.019999999999999997e18});
+        _assertComputeRStar({tau: YEAR, b0: 0.01e18, b1: -0.03e18, b2: 0, lam: 2 * YEAR, expected: -0.013608160417241994e18});
+        _assertComputeRStar({tau: 5 * YEAR, b0: 0.01e18, b1: -0.03e18, b2: 0, lam: 2 * YEAR, expected: -0.001014980016513213e18});
+        // forgefmt: disable-end
     }
 
-    /// @notice Call Python with batched test cases
-    function _callPython(NsTestCase[] memory cases) internal returns (int256[] memory) {
-        // Build JSON array
-        string memory json = "[";
-        for (uint256 i = 0; i < cases.length; i++) {
-            if (i > 0) json = string.concat(json, ",");
-            json = string.concat(
-                json,
-                "{",
-                '"tau":',
-                vm.toString(cases[i].tau),
-                ",",
-                '"beta0":',
-                vm.toString(cases[i].beta0),
-                ",",
-                '"beta1":',
-                vm.toString(cases[i].beta1),
-                ",",
-                '"beta2":',
-                vm.toString(cases[i].beta2),
-                ",",
-                '"lambda":',
-                vm.toString(cases[i].lambda),
-                "}"
-            );
-        }
-        json = string.concat(json, "]");
+    //////////////////////////////////////////////////////////////
+    ///                       Helper                           ///
+    //////////////////////////////////////////////////////////////
 
-        // Hex-encode JSON
-        bytes memory jsonBytes = bytes(json);
-        string memory hexJson = LibString.toHexString(jsonBytes);
-
-        // Call Python script
-        string[] memory inputs = new string[](4);
-        inputs[0] = "uv";
-        inputs[1] = "run";
-        inputs[2] = "test/scripts/nelson_siegel.py";
-        inputs[3] = hexJson;
-
-        bytes memory result = vm.ffi(inputs);
-
-        // Decode ABI-encoded results
-        int256[] memory results = abi.decode(result, (int256[]));
-        return results;
+    function _assertComputeRStar(uint256 tau, int256 b0, int256 b1, int256 b2, uint256 lam, int256 expected)
+        internal
+        pure
+    {
+        int256 result = NelsonSiegelLib.computeRStar({tau: tau, beta0: b0, beta1: b1, beta2: b2, lambda: lam});
+        // 0.01% tolerance
+        assertApproxEqRel(result, expected, 0.0001e18);
     }
 }
