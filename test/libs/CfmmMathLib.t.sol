@@ -42,6 +42,7 @@ contract CfmmMathLibTest is Test {
     ///                tau = 0 Shortcut Tests                  ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev At settlement (τ=0), price = 1 so cash = bondAmount
     function test_computeSwap_tau0_priceIsOne() public pure {
         // At tau=0 (settlement), price should be exactly 1
         // This means cash exchanged = bond amount
@@ -78,6 +79,7 @@ contract CfmmMathLibTest is Test {
     ///                Borrow/Lend Direction Tests             ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Borrow increases X (shadow reserve) and decreases y (cash out)
     function test_computeSwap_borrow_XIncreases() public pure {
         CfmmMathLib.CfmmParams memory params = _getDefaultParams();
         uint256 tau = SECONDS_PER_YEAR; // 1 year
@@ -96,6 +98,7 @@ contract CfmmMathLibTest is Test {
         assertLt(yNewWad, INITIAL_Y, "y should decrease on borrow (cash out)");
     }
 
+    /// @dev Lend decreases X (shadow reserve) and increases y (cash in)
     function test_computeSwap_lend_XDecreases() public pure {
         CfmmMathLib.CfmmParams memory params = _getDefaultParams();
         uint256 tau = SECONDS_PER_YEAR;
@@ -118,6 +121,7 @@ contract CfmmMathLibTest is Test {
     ///                   Psi Bounds Tests                     ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Large lend pushing ψ below ψ_min reverts with RateOutOfBounds
     /// forge-config: default.allow_internal_expect_revert = true
     function testRevert_computeSwap_psiBelowMin() public {
         // Create params with tight psi bounds
@@ -140,6 +144,7 @@ contract CfmmMathLibTest is Test {
         });
     }
 
+    /// @dev Large borrow pushing ψ above ψ_max reverts with RateOutOfBounds
     /// forge-config: default.allow_internal_expect_revert = true
     function testRevert_computeSwap_psiAboveMax() public {
         // Create params with tight psi bounds
@@ -160,6 +165,7 @@ contract CfmmMathLibTest is Test {
     ///                  Zero Amount Test                      ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Zero bond amount reverts with ZeroAmount error
     /// forge-config: default.allow_internal_expect_revert = true
     function testRevert_computeSwap_zeroAmount() public {
         CfmmMathLib.CfmmParams memory params = _getDefaultParams();
@@ -174,6 +180,7 @@ contract CfmmMathLibTest is Test {
     ///                   Price Discount Test                  ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Longer maturity = higher discount = less cash for same bond amount
     function test_computeSwap_priceDecreasesWithTau() public pure {
         CfmmMathLib.CfmmParams memory params = CfmmMathLib.CfmmParams({
             beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA, kappa: KAPPA, psiMin: 0, psiMax: type(uint256).max
@@ -220,7 +227,7 @@ contract CfmmMathLibTest is Test {
         uint256 yNewWad;
     }
 
-    /// @notice Batched differential fuzz test against Python
+    /// @dev Differential test: Solidity results match Python reference implementation
     /// forge-config: default.allow_internal_expect_revert = true
     function testFuzz_computeSwap_matchesPython(uint256 seed) public {
         SwapTestCase[] memory cases = _generateTestCases(seed);

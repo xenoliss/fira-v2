@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 import {CfmmMathLib} from "./libs/CfmmMathLib.sol";
+import {SolvencyLib} from "./libs/SolvencyLib.sol";
 import {BondToken} from "./tokens/BondToken.sol";
 
 /// @title Fira - TS-BondMM v2.2.1
@@ -86,9 +87,8 @@ contract Fira {
     ///                  Maturity Buckets                     ///
     //////////////////////////////////////////////////////////////
 
-    /// @notice Node in the maturity doubly-linked list
+    /// @notice Node in the maturity singly-linked list
     struct MaturityNode {
-        uint256 prev; // Previous maturity timestamp (0 if head)
         uint256 next; // Next maturity timestamp (0 if tail)
         uint256 b; // Borrower notional (WAD)
         uint256 l; // Lender notional (WAD)
@@ -110,38 +110,85 @@ contract Fira {
     /// @notice Past-due aggregate (WAD)
     int256 public sPast;
 
+    /// @notice Total LP shares (WAD). Zero until M3.
+    uint256 public nLp;
+
+    /// @notice Weight decay timescale (seconds)
+    uint256 public lambdaW;
+
+    /// @notice Borrower weight haircut (WAD, 0 to 1)
+    int256 public etaB;
+
+    /// @notice Lender weight premium (WAD, >= 0)
+    int256 public etaL;
+
+    /// @notice Vault weight for solvency (WAD, 0 to 1)
+    int256 public wVault;
+
+    /// @notice Solvency floor per LP share (WAD)
+    int256 public rho;
+
     //////////////////////////////////////////////////////////////
     ///                     Constructor                       ///
     //////////////////////////////////////////////////////////////
 
-    constructor(
-        address cash,
-        address bond,
-        int256 beta0_,
-        int256 beta1_,
-        int256 beta2_,
-        uint256 lambda_,
-        int256 kappa_,
-        uint256 tauMin_,
-        uint256 tauMax_,
-        uint256 psiMin_,
-        uint256 psiMax_
-    ) {
-        CASH = ERC20(cash);
-        BOND = BondToken(bond);
-        CASH_DECIMALS = ERC20(cash).decimals();
+    /// @notice Nelson-Siegel term structure parameters
+    struct NSParams {
+        int256 beta0; // Long-term rate (WAD)
+        int256 beta1; // Slope (WAD)
+        int256 beta2; // Curvature (WAD)
+        uint256 lambda; // Decay timescale (seconds)
+    }
+
+    /// @notice CFMM pricing parameters
+    struct CfmmParams {
+        int256 kappa; // Rate sensitivity (WAD)
+        uint256 tauMin; // Minimum time to maturity (seconds)
+        uint256 tauMax; // Maximum time to maturity (seconds)
+        uint256 psiMin; // Minimum utilization ratio (WAD)
+        uint256 psiMax; // Maximum utilization ratio (WAD)
+    }
+
+    /// @notice Solvency check parameters
+    struct SolvencyParams {
+        uint256 lambdaW; // Weight decay timescale (seconds)
+        int256 etaB; // Borrower haircut (WAD)
+        int256 etaL; // Lender premium (WAD)
+        int256 wVault; // Vault weight (WAD)
+        int256 rho; // Floor per LP share (WAD)
+    }
+
+    /// @notice Constructor parameters grouped by concern
+    struct ConstructorParams {
+        address cash;
+        address bond;
+        NSParams ns;
+        CfmmParams cfmm;
+        SolvencyParams solvency;
+    }
+
+    constructor(ConstructorParams memory p) {
+        CASH = ERC20(p.cash);
+        BOND = BondToken(p.bond);
+        CASH_DECIMALS = ERC20(p.cash).decimals();
         DECIMAL_SCALE = 10 ** (18 - CASH_DECIMALS);
 
-        beta0 = beta0_;
-        beta1 = beta1_;
-        beta2 = beta2_;
-        lambda = lambda_;
-        kappa = kappa_;
+        beta0 = p.ns.beta0;
+        beta1 = p.ns.beta1;
+        beta2 = p.ns.beta2;
+        lambda = p.ns.lambda;
 
-        tauMin = tauMin_;
-        tauMax = tauMax_;
-        psiMin = psiMin_;
-        psiMax = psiMax_;
+        kappa = p.cfmm.kappa;
+        tauMin = p.cfmm.tauMin;
+        tauMax = p.cfmm.tauMax;
+        psiMin = p.cfmm.psiMin;
+        psiMax = p.cfmm.psiMax;
+
+        lambdaW = p.solvency.lambdaW;
+        etaB = p.solvency.etaB;
+        etaL = p.solvency.etaL;
+        wVault = p.solvency.wVault;
+        rho = p.solvency.rho;
     }
 
     //////////////////////////////////////////////////////////////
@@ -178,6 +225,9 @@ contract Fira {
         yLiq -= cashOut;
         maturities[maturity].b += bondAmount;
 
+        // Solvency check
+        _checkSolvency();
+
         // Token transfers
         BOND.burn({from: msg.sender, maturity: maturity, amount: bondAmount});
         CASH.transfer({to: msg.sender, amount: cashOut});
@@ -210,6 +260,9 @@ contract Fira {
         uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
         maturities[maturity].l += bondAmount;
+
+        // Solvency check
+        _checkSolvency();
 
         // Token transfers
         CASH.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
@@ -250,6 +303,9 @@ contract Fira {
         maturities[maturity].b -= amountWad; // Reverts if maturity does not exist
         sPast -= int256(amountWad);
 
+        // Solvency check
+        _checkSolvency();
+
         // Token transfers
         CASH.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
         BOND.mint({to: msg.sender, maturity: maturity, amount: amountWad});
@@ -289,6 +345,9 @@ contract Fira {
         maturities[maturity].l -= amountWad; // Reverts if maturity does not exist
         sPast += int256(amountWad);
 
+        // Solvency check
+        _checkSolvency();
+
         // Token transfers
         BOND.burn({from: msg.sender, maturity: maturity, amount: amountWad});
         CASH.transfer({to: msg.sender, amount: cashOut});
@@ -321,27 +380,22 @@ contract Fira {
         // Insert at head (hint = 0)
         if (hint == 0) {
             require(maturity < head, InvalidHint());
-            maturities[head].prev = maturity;
             maturities[maturity].next = head;
             head = maturity;
             return;
         }
 
-        // Verify hint
+        // Verify hint and insert after
         require(hint < maturity, InvalidHint());
         require(_isActive({maturity: hint}), InvalidHint());
 
         uint256 nextNode = maturities[hint].next;
         require(nextNode == 0 || nextNode > maturity, InvalidHint());
 
-        // Insert after hint
-        maturities[maturity].prev = hint;
         maturities[maturity].next = nextNode;
         maturities[hint].next = maturity;
 
-        if (nextNode != 0) {
-            maturities[nextNode].prev = maturity;
-        } else {
+        if (nextNode == 0) {
             tail = maturity;
         }
     }
@@ -352,40 +406,27 @@ contract Fira {
     ///      Removes from linked list but keeps b and l in mapping for settlement
     ///
     /// @param maturity Maturity timestamp to expire
-    function expireMaturity(uint256 maturity) external {
+    /// @param hint Previous node in the list (0 if maturity is head)
+    function expireMaturity(uint256 maturity, uint256 hint) external {
         require(block.timestamp >= maturity, MaturityNotReached());
         require(_isActive({maturity: maturity}), MaturityNotActive());
 
-        MaturityNode storage node = maturities[maturity];
-
-        // 1. Roll net position into S_past (b - l)
-        int256 net = int256(node.b) - int256(node.l);
-        sPast += net;
-
-        // 2. Remove from linked list (O(1))
+        // Remove from linked list
         if (head == maturity) {
-            // Expiring the head node
-            head = node.next;
-            if (node.next != 0) {
-                maturities[node.next].prev = 0;
-            } else {
-                // List is now empty
-                tail = 0;
-            }
+            head = maturities[maturity].next;
+            if (head == 0) tail = 0;
         } else {
-            // Not the head, update prev node's next pointer
-            maturities[node.prev].next = node.next;
-            if (node.next != 0) {
-                maturities[node.next].prev = node.prev;
-            } else {
-                // Expiring the tail node
-                tail = node.prev;
-            }
+            require(maturities[hint].next == maturity, InvalidHint());
+            maturities[hint].next = maturities[maturity].next;
+            if (tail == maturity) tail = hint;
         }
 
-        // Clear prev/next pointers (but keep b and l for settlement)
-        node.prev = 0;
-        node.next = 0;
+        // Update state
+        maturities[maturity].next = 0;
+
+        // Roll net position into S_past (b - l)
+        int256 net = int256(maturities[maturity].b) - int256(maturities[maturity].l);
+        sPast += net;
 
         emit MaturityExpiredEvent({maturity: maturity, netPosition: net});
     }
@@ -418,19 +459,48 @@ contract Fira {
         require(_isActive({maturity: maturity}), MaturityNotActive());
     }
 
+    /// @notice Check solvency floor after state changes.
+    ///
+    /// @dev Iterates directly over maturity linked list.
+    ///      E_risk = y_liq + y_pnl + w_vault·y_vault + S_past + Σ(w_b(τ)·b - w_l(τ)·l)
+    function _checkSolvency() internal view {
+        // 1. Compute base equity
+        int256 eRisk = SolvencyLib.computeBaseEquity({
+            yLiqWad: yLiq * DECIMAL_SCALE,
+            yPnlWad: yPnl * DECIMAL_SCALE,
+            yVaultWad: yVault * DECIMAL_SCALE,
+            wVault: wVault,
+            sPast: sPast
+        });
+        int256 minERisk = eRisk;
+
+        // 2. Iterate over maturities (sorted by tau ascending)
+        uint256 current = head;
+        while (current != 0) {
+            MaturityNode storage node = maturities[current];
+
+            int256 net = SolvencyLib.computeWeightedNet({
+                tau: current - block.timestamp, b: node.b, l: node.l, lambdaW: lambdaW, etaB: etaB, etaL: etaL
+            });
+
+            eRisk += net;
+            if (eRisk < minERisk) minERisk = eRisk;
+
+            current = node.next;
+        }
+
+        // 3. Check floor
+        SolvencyLib.checkFloor({minERisk: minERisk, rho: rho, nLp: nLp});
+    }
+
     /// @notice Check if a maturity is in the active linked list.
     ///
-    /// @dev Returns true if maturity is tracked in the list. Note that a maturity
-    ///      can be "active" (in the list) even if block.timestamp >= maturity.
-    ///      Use expireMaturity() to remove past-due maturities from the list.
+    /// @dev Derived from linked list structure: active if has successor or is tail.
     ///
     /// @param maturity Maturity timestamp (seconds).
     ///
     /// @return True if maturity is in the active list.
     function _isActive(uint256 maturity) internal view returns (bool) {
-        if (head == maturity || tail == maturity) return true;
-
-        MaturityNode storage node = maturities[maturity];
-        return node.prev != 0 || node.next != 0;
+        return maturities[maturity].next != 0 || maturity == tail;
     }
 }

@@ -25,6 +25,7 @@ contract NelsonSiegelLibTest is Test {
     ///                   tau = 0 Tests                        ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev At τ=0, f1=1, f2=0 so r* = β0 + β1
     function test_computeRStar_tau0_returnsBeta0PlusBeta1() public pure {
         // When tau = 0: f1(0) = 1, f2(0) = 0 -> r* = beta0 + beta1
         int256 result = NelsonSiegelLib.computeRStar({tau: 0, beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA});
@@ -37,6 +38,7 @@ contract NelsonSiegelLibTest is Test {
     ///                   Flat Curve Tests                     ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Flat curve (β1=β2=0) returns β0 for all maturities
     function test_computeRStar_flatCurve_returnsBeta0() public pure {
         // Flat curve: beta1 = beta2 = 0 -> r* = beta0 for all maturities
         int256 beta0 = 0.03e18; // 3%
@@ -55,6 +57,7 @@ contract NelsonSiegelLibTest is Test {
     ///                Normal Curve Tests                      ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Normal curve (β1<0): short rates < long rates
     function test_computeRStar_normalCurve_increasesWithTau() public pure {
         // Normal upward-sloping curve: beta1 < 0
         // Short rates lower than long rates
@@ -80,6 +83,7 @@ contract NelsonSiegelLibTest is Test {
     ///               Inverted Curve Tests                     ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Inverted curve (β1>0): short rates > long rates
     function test_computeRStar_invertedCurve_decreasesWithTau() public pure {
         // Inverted curve: beta1 > 0
         // Short rates higher than long rates
@@ -105,6 +109,7 @@ contract NelsonSiegelLibTest is Test {
     ///                Convergence Tests                       ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev As τ→∞, r* converges to β0 (f1, f2 → 0)
     function test_computeRStar_largeTau_approachesBeta0() public pure {
         // As tau -> infinity: f1(tau) -> 0, f2(tau) -> 0 -> r* -> beta0
 
@@ -130,6 +135,7 @@ contract NelsonSiegelLibTest is Test {
     ///                    Curvature Tests                     ///
     //////////////////////////////////////////////////////////////
 
+    /// @dev Positive β2 creates hump: mid-term rates > short & long rates
     function test_computeRStar_positiveBeta2_createsHump() public pure {
         // Positive beta2 creates a hump in the middle of the curve
         int256 beta2Positive = 0.03e18;
@@ -177,7 +183,7 @@ contract NelsonSiegelLibTest is Test {
         uint256 lambda; // seconds
     }
 
-    /// @notice Batched differential fuzz test against Python
+    /// @dev Differential test: Solidity results match Python reference implementation
     function testFuzz_computeRStar_matchesPython(uint256 seed) public {
         NsTestCase[] memory cases = _generateTestCases(seed);
         int256[] memory pythonResults = _callPython(cases);
