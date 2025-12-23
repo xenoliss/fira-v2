@@ -5,8 +5,9 @@ import {Test, console} from "forge-std/Test.sol";
 
 import {Fira} from "../src/Fira.sol";
 import {FiraHarness} from "./mocks/FiraHarness.sol";
-import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBondToken} from "./mocks/MockBondToken.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
+import {MockLpToken} from "./mocks/MockLpToken.sol";
 
 /// @title FiraTest - Integration tests for Fira protocol
 contract FiraTest is Test {
@@ -23,7 +24,7 @@ contract FiraTest is Test {
     uint256 constant LAMBDA = 2 * SECONDS_PER_YEAR; // 2 year decay
 
     // CFMM parameters
-    int256 constant KAPPA = 0.5e18;
+    uint256 constant KAPPA = 0.5e18;
     uint256 constant TAU_MIN = 7 days;
     uint256 constant TAU_MAX = 5 * SECONDS_PER_YEAR;
     uint256 constant PSI_MIN = 0.5e18; // 50%
@@ -37,12 +38,12 @@ contract FiraTest is Test {
     int256 constant RHO = 0; // Zero floor (no LPs yet)
 
     // Initial pool state
-    uint256 constant INITIAL_Y_LIQ = 10_000e6; // 10,000 USDC (6 decimals)
+    uint256 constant INITIAL_Y_LIQ = 10_000e6; // 10,000 cash (6 decimals)
     uint256 constant INITIAL_X = 10_000e18; // 10,000 WAD (psi = 1)
 
     // Test amounts
     uint256 constant BOND_AMOUNT = 1000e18; // 1000 FV in WAD
-    uint256 constant CASH_AMOUNT = 1000e6; // 1000 USDC
+    uint256 constant CASH_AMOUNT = 1000e6; // 1000 cash
 
     //////////////////////////////////////////////////////////////
     ///                       State                            ///
@@ -50,6 +51,7 @@ contract FiraTest is Test {
 
     MockERC20 cash;
     MockBondToken bondToken;
+    MockLpToken lpToken;
     FiraHarness fira;
 
     address borrower = makeAddr("borrower");
@@ -63,14 +65,16 @@ contract FiraTest is Test {
 
     function setUp() public {
         // 1. Deploy mocks
-        cash = new MockERC20({name: "USD Coin", symbol: "USDC", decimals: 6});
+        cash = new MockERC20({name: "Mock Cash", symbol: "CASH", decimals: 6});
         bondToken = new MockBondToken();
+        lpToken = new MockLpToken();
 
         // 2. Deploy Fira with test parameters
         fira = new FiraHarness(
             Fira.ConstructorParams({
-                cash: address(cash),
-                bond: address(bondToken),
+                cashToken: address(cash),
+                bondToken: address(bondToken),
+                lpToken: address(lpToken),
                 ns: Fira.NSParams({beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA}),
                 cfmm: Fira.CfmmParams({
                     kappa: KAPPA, tauMin: TAU_MIN, tauMax: TAU_MAX, psiMin: PSI_MIN, psiMax: PSI_MAX
@@ -257,27 +261,21 @@ contract FiraTest is Test {
         assertEq(bPosition, borrowAmount, "b should equal borrowed amount");
 
         // Borrower needs cash to repay
-        // At tau=0, repay amount in native decimals = bPosition / DECIMAL_SCALE
-        uint256 repayAmountNative = borrowAmount / 1e12; // Convert WAD to 6 decimals
-        cash.mint({to: borrower, amount: repayAmountNative});
+        // At tau=0, cashIn = ceil(bondAmount / DECIMAL_SCALE)
+        uint256 expectedCashCost = (borrowAmount + 1e12 - 1) / 1e12; // Round UP
+        cash.mint({to: borrower, amount: expectedCashCost});
 
         uint256 cashBefore = cash.balanceOf(borrower);
 
         vm.startPrank(borrower);
         cash.approve({spender: address(fira), amount: type(uint256).max});
-        fira.repay({maturity: maturity, amount: repayAmountNative});
+        fira.repay({maturity: maturity, bondAmount: borrowAmount});
         vm.stopPrank();
 
         uint256 cashAfter = cash.balanceOf(borrower);
 
-        // At settlement (tau=0), should be 1:1
-        // Cash paid should be approximately repayAmountNative (some precision loss possible)
-        assertApproxEqAbs(
-            cashBefore - cashAfter,
-            repayAmountNative,
-            1, // 1 wei tolerance
-            "Settlement should be 1:1"
-        );
+        // At settlement (tau=0), should be 1:1 (with round UP for protocol protection)
+        assertEq(cashBefore - cashAfter, expectedCashCost, "Settlement should be 1:1 (rounded up)");
     }
 
     /// @dev At maturity (τ=0), redeem is 1:1 (cash = bondAmount)
@@ -298,18 +296,18 @@ contract FiraTest is Test {
         uint256 bondBalance = bondToken.balanceOf({owner: lender, id: maturity});
         assertEq(bondBalance, lendAmount, "Lender should have bonds");
 
-        uint256 redeemAmountNative = lendAmount / 1e12; // Convert WAD to 6 decimals
+        uint256 expectedCashOut = lendAmount / 1e12; // Convert WAD to 6 decimals
         uint256 cashBefore = cash.balanceOf(lender);
 
         vm.startPrank(lender);
         bondToken.setApprovalForAll({operator: address(fira), isApproved: true});
-        fira.redeem({maturity: maturity, amount: redeemAmountNative});
+        fira.redeem({maturity: maturity, bondAmount: lendAmount});
         vm.stopPrank();
 
         uint256 cashAfter = cash.balanceOf(lender);
 
         // At settlement (tau=0), should be 1:1
-        assertApproxEqAbs(cashAfter - cashBefore, redeemAmountNative, 1, "Settlement should be 1:1");
+        assertApproxEqAbs(cashAfter - cashBefore, expectedCashOut, 1, "Settlement should be 1:1");
     }
 
     //////////////////////////////////////////////////////////////
@@ -319,10 +317,12 @@ contract FiraTest is Test {
     /// @dev Adding first maturity sets both head and tail
     function test_addMaturity_toEmptyList() public {
         // Create a fresh Fira with no maturities
+        MockLpToken freshLpToken = new MockLpToken();
         FiraHarness freshFira = new FiraHarness(
             Fira.ConstructorParams({
-                cash: address(cash),
-                bond: address(bondToken),
+                cashToken: address(cash),
+                bondToken: address(bondToken),
+                lpToken: address(freshLpToken),
                 ns: Fira.NSParams({beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA}),
                 cfmm: Fira.CfmmParams({
                     kappa: KAPPA, tauMin: TAU_MIN, tauMax: TAU_MAX, psiMin: PSI_MIN, psiMax: PSI_MAX
@@ -372,6 +372,105 @@ contract FiraTest is Test {
     }
 
     //////////////////////////////////////////////////////////////
+    ///                  Deposit Tests                         ///
+    //////////////////////////////////////////////////////////////
+
+    /// @dev First deposit (bootstrap): gets 1:1 shares.
+    function test_deposit_bootstrap() public {
+        // Reset pool state to simulate bootstrap
+        fira.setX({x: 0});
+        fira.setYLiq({y: 0});
+        // LP token starts with 0 supply (no minting needed)
+
+        // Give depositor some cash
+        address depositor = makeAddr("depositor");
+        uint256 depositAmount = 1000e6;
+        cash.mint({to: depositor, amount: depositAmount});
+
+        vm.startPrank(depositor);
+        cash.approve({spender: address(fira), amount: depositAmount});
+        fira.deposit({amount: depositAmount});
+        vm.stopPrank();
+
+        // Check shares minted (1:1 in bootstrap)
+        uint256 expectedShares = depositAmount * 1e12; // WAD scale
+        assertEq(lpToken.totalSupply(), expectedShares, "Should mint 1:1 shares");
+        assertEq(lpToken.balanceOf(depositor), expectedShares, "Depositor should receive shares");
+
+        // Check X set correctly (psi = 1)
+        assertEq(fira.X(), expectedShares, "X should equal yPrin in bootstrap");
+
+        // Check yLiq updated
+        assertEq(fira.yLiq(), depositAmount, "yLiq should equal deposit");
+    }
+
+    /// @dev Normal deposit: shares proportional to NAV.
+    function test_deposit_normal() public {
+        // Current state: yLiq = 10_000e6, X = 10_000e18
+        // Simulate existing LP shares by minting to a dummy address
+        address existingLp = makeAddr("existingLp");
+        lpToken.mint({to: existingLp, amount: 10_000e18});
+
+        address depositor = makeAddr("depositor");
+        uint256 depositAmount = 1000e6;
+        cash.mint({to: depositor, amount: depositAmount});
+
+        uint256 nLpBefore = lpToken.totalSupply();
+        uint256 yLiqBefore = fira.yLiq();
+        uint256 XBefore = fira.X();
+
+        vm.startPrank(depositor);
+        cash.approve({spender: address(fira), amount: depositAmount});
+        fira.deposit({amount: depositAmount});
+        vm.stopPrank();
+
+        // eNom = yLiq + yPnl + yVault + sPast + sumBucketNet
+        // In this test: eNom = 10_000e18 + 0 + 0 + 0 + 0 = 10_000e18
+        // shares = deposit * nLp / eNom = 1000e18 * 10_000e18 / 10_000e18 = 1000e18
+        uint256 depositWad = depositAmount * 1e12;
+        uint256 expectedShares = depositWad * nLpBefore / (yLiqBefore * 1e12);
+        assertEq(lpToken.balanceOf(depositor), expectedShares, "Shares should be proportional");
+
+        // X should scale: XNew = X * yPrinNew / yPrinOld
+        uint256 yPrinOldWad = yLiqBefore * 1e12;
+        uint256 yPrinNewWad = (yLiqBefore + depositAmount) * 1e12;
+        uint256 expectedX = XBefore * yPrinNewWad / yPrinOldWad;
+        assertEq(fira.X(), expectedX, "X should scale proportionally");
+    }
+
+    /// @dev Deposit emits event correctly.
+    function test_deposit_emitsEvent() public {
+        // Simulate existing LP shares
+        address existingLp = makeAddr("existingLp");
+        lpToken.mint({to: existingLp, amount: 10_000e18});
+
+        address depositor = makeAddr("depositor");
+        uint256 depositAmount = 500e6;
+        cash.mint({to: depositor, amount: depositAmount});
+
+        uint256 depositWad = depositAmount * 1e12;
+        uint256 expectedShares = depositWad; // NAV = 1 in this case
+
+        vm.startPrank(depositor);
+        cash.approve({spender: address(fira), amount: depositAmount});
+
+        vm.expectEmit(true, false, false, true);
+        emit Fira.Deposited({user: depositor, amount: depositAmount, shares: expectedShares});
+        fira.deposit({amount: depositAmount});
+        vm.stopPrank();
+    }
+
+    /// @dev Deposit reverts on zero amount.
+    function test_deposit_revertIfZeroAmount() public {
+        address depositor = makeAddr("depositor");
+
+        vm.startPrank(depositor);
+        vm.expectRevert(Fira.ZeroDeposit.selector);
+        fira.deposit({amount: 0});
+        vm.stopPrank();
+    }
+
+    //////////////////////////////////////////////////////////////
     ///                  Revert Tests                          ///
     //////////////////////////////////////////////////////////////
 
@@ -408,7 +507,7 @@ contract FiraTest is Test {
         cash.approve({spender: address(fira), amount: type(uint256).max});
 
         vm.expectRevert(Fira.MaturityActive.selector);
-        fira.repay({maturity: maturity, amount: 100e6});
+        fira.repay({maturity: maturity, bondAmount: 100e18});
         vm.stopPrank();
     }
 }

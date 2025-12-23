@@ -18,7 +18,7 @@ contract CfmmMathLibTest is Test {
     int256 constant BETA1 = -0.02e18; // -2%
     int256 constant BETA2 = 0.01e18; // 1%
     uint256 constant LAMBDA = 2 * SECONDS_PER_YEAR;
-    int256 constant KAPPA = 0.5e18; // rate sensitivity
+    uint256 constant KAPPA = 0.5e18; // rate sensitivity (κ > 0)
     uint256 constant PSI_MIN = 0.5e18; // 50%
     uint256 constant PSI_MAX = 2e18; // 200%
 
@@ -30,7 +30,7 @@ contract CfmmMathLibTest is Test {
     ///                tau = 0 Shortcut Tests                  ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev At settlement (τ=0), price = 1 so cash = bondAmount
+    /// @dev When τ=0 (settlement), price should be 1 and cash should equal bondAmount.
     function test_computeSwap_tauZero_priceIsOne() public pure {
         // At tau=0 (settlement), price should be exactly 1
         // This means cash exchanged = bond amount
@@ -68,7 +68,7 @@ contract CfmmMathLibTest is Test {
     ///                Borrow/Lend Direction Tests             ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Borrow increases X (shadow reserve) and decreases y (cash out)
+    /// @dev X should increase and y should decrease when borrowing.
     function test_computeSwap_borrow_XIncreases() public pure {
         CfmmMathLib.CfmmParams memory params = _getDefaultParams();
         uint256 tau = SECONDS_PER_YEAR; // 1 year
@@ -87,7 +87,7 @@ contract CfmmMathLibTest is Test {
         assertLt(yNewWad, INITIAL_Y, "y should decrease on borrow (cash out)");
     }
 
-    /// @dev Lend decreases X (shadow reserve) and increases y (cash in)
+    /// @dev X should decrease and y should increase when lending.
     function test_computeSwap_lend_XDecreases() public pure {
         CfmmMathLib.CfmmParams memory params = _getDefaultParams();
         uint256 tau = SECONDS_PER_YEAR;
@@ -110,7 +110,7 @@ contract CfmmMathLibTest is Test {
     ///                   Price Discount Test                  ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Longer maturity = higher discount = less cash for same bond amount
+    /// @dev Longer maturity should result in less cash for the same bond amount.
     function test_computeSwap_longerMaturity_lowerPrice() public pure {
         CfmmMathLib.CfmmParams memory params = CfmmMathLib.CfmmParams({
             beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA, kappa: KAPPA, psiMin: 0, psiMax: type(uint256).max
@@ -152,7 +152,7 @@ contract CfmmMathLibTest is Test {
     ///                   Borrow (∆x > 0)                      ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev When borrowing (bondAmount > 0), X should increase and y should decrease.
+    /// @dev X should increase and y should decrease when borrowing (bondAmount > 0).
     ///      The borrower sells bonds to the pool and receives cash.
     function test_computeSwap_borrow_matchesPythonOutput() public pure {
         // forgefmt: disable-start
@@ -202,8 +202,7 @@ contract CfmmMathLibTest is Test {
     ///                   ψ Variations                         ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev When the initial ψ (X/y ratio) varies, the trade outcome should differ accordingly.
-    ///      Higher ψ means higher implied rates, affecting discount and slippage.
+    /// @dev Trade outcomes should differ when initial ψ (X/y ratio) varies.
     function test_computeSwap_psiVariations_matchesPythonOutput() public pure {
         // forgefmt: disable-start
         _assertComputeSwap({tau: 365 days, bond: 50e18, X: 500e18, y: 1000e18, psiMin: 0.1e18, psiMax: 10e18, expectedX: 532.2434608179561e18, expectedY: 934.0056388716611e18});
@@ -219,8 +218,7 @@ contract CfmmMathLibTest is Test {
     ///                  Large Trades (Slippage)               ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev When trades exceed 20% of pool size, significant slippage should occur.
-    ///      The CFMM curvature protects against large trades depleting liquidity.
+    /// @dev Significant slippage should occur when trades exceed 20% of pool size.
     function test_computeSwap_largeTrades_matchesPythonOutput() public pure {
         // forgefmt: disable-start
         _assertComputeSwap({tau: 365 days, bond: 300e18, X: 1000e18, y: 1000e18, psiMin: 0.1e18, psiMax: 10e18, expectedX: 1069.697349770659e18, expectedY: 736.2503063495396e18});
@@ -258,6 +256,76 @@ contract CfmmMathLibTest is Test {
         vm.expectRevert(CfmmMathLib.ZeroAmount.selector);
         CfmmMathLib.computeSwap({
             tau: SECONDS_PER_YEAR, bondAmountSigned: 0, X: INITIAL_X, yWad: INITIAL_Y, params: params
+        });
+    }
+
+    //////////////////////////////////////////////////////////////
+    ///           computeSwapAtSettlement Tests                ///
+    //////////////////////////////////////////////////////////////
+
+    /// @dev Settlement swap should be exactly 1:1 (linear exchange).
+    function test_computeSwapAtSettlement_linear() public pure {
+        uint256 X = 1000e18;
+        uint256 y = 1000e18;
+
+        // Redeem: bondAmount > 0, cash goes out
+        uint256 XNew = CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: 100e18, X: X, yWad: y, psiMin: 0.1e18, psiMax: 10e18
+        });
+
+        assertEq(XNew, 1100e18, "XNew should be X + bondAmount");
+
+        // Repay: bondAmount < 0, cash comes in
+        XNew = CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: -100e18, X: X, yWad: y, psiMin: 0.1e18, psiMax: 10e18
+        });
+
+        assertEq(XNew, 900e18, "XNew should be X - bondAmount");
+    }
+
+    /// @dev Settlement swap should match computeSwap at tau=0.
+    function test_computeSwapAtSettlement_matchesComputeSwapTauZero() public pure {
+        uint256 X = 1000e18;
+        uint256 y = 1000e18;
+        int256 bondAmount = 100e18;
+
+        // Using computeSwapAtSettlement
+        uint256 XNew1 = CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: bondAmount, X: X, yWad: y, psiMin: 0.1e18, psiMax: 10e18
+        });
+
+        // Using computeSwap with tau=0
+        CfmmMathLib.CfmmParams memory params = CfmmMathLib.CfmmParams({
+            beta0: BETA0, beta1: BETA1, beta2: BETA2, lambda: LAMBDA, kappa: KAPPA, psiMin: 0.1e18, psiMax: 10e18
+        });
+        (uint256 XNew2,) =
+            CfmmMathLib.computeSwap({tau: 0, bondAmountSigned: bondAmount, X: X, yWad: y, params: params});
+
+        // Should be identical (within small precision tolerance)
+        assertApproxEqRel(XNew1, XNew2, 0.0001e18, "XNew should match");
+    }
+
+    /// @dev Settlement swap should revert when psi goes out of bounds.
+    /// forge-config: default.allow_internal_expect_revert = true
+    function testRevert_computeSwapAtSettlement_psiOutOfBounds() public {
+        uint256 X = 1000e18;
+        uint256 y = 1000e18;
+
+        // Large redeem pushes psi above max
+        vm.expectRevert(CfmmMathLib.RateOutOfBounds.selector);
+        CfmmMathLib.computeSwapAtSettlement({bondAmountSigned: 800e18, X: X, yWad: y, psiMin: 0.5e18, psiMax: 2e18});
+
+        // Large repay pushes psi below min
+        vm.expectRevert(CfmmMathLib.RateOutOfBounds.selector);
+        CfmmMathLib.computeSwapAtSettlement({bondAmountSigned: -800e18, X: X, yWad: y, psiMin: 0.5e18, psiMax: 2e18});
+    }
+
+    /// @dev Settlement swap should revert on zero amount.
+    /// forge-config: default.allow_internal_expect_revert = true
+    function testRevert_computeSwapAtSettlement_zeroAmount() public {
+        vm.expectRevert(CfmmMathLib.ZeroAmount.selector);
+        CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: 0, X: 1000e18, yWad: 1000e18, psiMin: 0.5e18, psiMax: 2e18
         });
     }
 

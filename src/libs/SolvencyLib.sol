@@ -33,7 +33,9 @@ library SolvencyLib {
         pure
         returns (int256 base)
     {
+        // weightedVault = w_vault · y_vault
         int256 weightedVault = FixedPointMathLib.sMulWad({x: wVault, y: int256(yVaultWad)});
+        // base = y_liq + y_pnl + weightedVault + sPast
         return int256(yLiqWad + yPnlWad) + weightedVault + sPast;
     }
 
@@ -72,14 +74,15 @@ library SolvencyLib {
 
     /// @notice Check solvency floor and revert if violated.
     ///
-    /// @dev Floor check: minERisk >= ρ · N_LP
+    /// @dev Floor check: minErisk >= ρ · N_LP
     ///
-    /// @param minERisk Minimum risk-weighted equity across horizons (WAD)
+    /// @param minErisk Minimum risk-weighted equity across horizons (WAD)
     /// @param rho Floor per LP share (WAD)
     /// @param nLp Total LP shares (WAD)
-    function checkFloor(int256 minERisk, int256 rho, uint256 nLp) internal pure {
+    function checkFloor(int256 minErisk, int256 rho, uint256 nLp) internal pure {
+        // floor = ρ · N_LP
         int256 floor = FixedPointMathLib.sMulWad({x: rho, y: int256(nLp)});
-        require(minERisk >= floor, SolvencyFloorViolated());
+        require(minErisk >= floor, SolvencyFloorViolated());
     }
 
     //////////////////////////////////////////////////////////////
@@ -99,8 +102,11 @@ library SolvencyLib {
     function _computePhi(uint256 tau, uint256 lambdaW) private pure returns (int256 phi) {
         if (tau == 0) return 0;
 
+        // ratio = τ / λ_w
         int256 ratio = FixedPointMathLib.sDivWad({x: int256(tau), y: int256(lambdaW)});
+        // expNeg = e^(-τ/λ_w)
         int256 expNeg = FixedPointMathLib.expWad({x: -ratio});
+        // φ = 1 - expNeg
         return 1e18 - expNeg;
     }
 }

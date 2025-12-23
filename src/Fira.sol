@@ -4,8 +4,10 @@ pragma solidity ^0.8.30;
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 import {CfmmMathLib} from "./libs/CfmmMathLib.sol";
+import {LpLib} from "./libs/LpLib.sol";
 import {SolvencyLib} from "./libs/SolvencyLib.sol";
 import {BondToken} from "./tokens/BondToken.sol";
+import {LpToken} from "./tokens/LpToken.sol";
 
 /// @title Fira - TS-BondMM v2.2.1
 ///
@@ -22,6 +24,7 @@ contract Fira {
     error InvalidHint();
     error MaturityNotReached();
     error InsufficientYLiq();
+    error ZeroDeposit();
 
     //////////////////////////////////////////////////////////////
     ///                       Events                           ///
@@ -31,18 +34,21 @@ contract Fira {
 
     event Lent(address indexed user, uint256 indexed maturity, uint256 bondAmount, uint256 cashNet);
 
-    event Repaid(address indexed user, uint256 indexed maturity, uint256 amount);
+    event Repaid(address indexed user, uint256 indexed maturity, uint256 bondAmount);
 
-    event Redeemed(address indexed user, uint256 indexed maturity, uint256 amount);
+    event Redeemed(address indexed user, uint256 indexed maturity, uint256 bondAmount);
 
     event MaturityExpiredEvent(uint256 indexed maturity, int256 netPosition);
+
+    event Deposited(address indexed user, uint256 amount, uint256 shares);
 
     //////////////////////////////////////////////////////////////
     ///                       Immutables                       ///
     //////////////////////////////////////////////////////////////
 
-    ERC20 public immutable CASH;
-    BondToken public immutable BOND;
+    ERC20 public immutable CASH_TOKEN;
+    BondToken public immutable BOND_TOKEN;
+    LpToken public immutable LP_TOKEN;
     uint8 public immutable CASH_DECIMALS;
     uint256 public immutable DECIMAL_SCALE; // 10^(18 - CASH_DECIMALS)
 
@@ -75,7 +81,7 @@ contract Fira {
     ///                  Pricing Parameters                   ///
     //////////////////////////////////////////////////////////////
 
-    int256 public kappa; // WAD - rate sensitivity
+    uint256 public kappa; // WAD - rate sensitivity (κ > 0)
 
     uint256 public tauMin; // seconds
     uint256 public tauMax; // seconds
@@ -104,14 +110,11 @@ contract Fira {
     mapping(uint256 maturity => MaturityNode) public maturities;
 
     //////////////////////////////////////////////////////////////
-    ///                  Solvency Storage (M2)                ///
+    ///                     Solvency Storage                   ///
     //////////////////////////////////////////////////////////////
 
     /// @notice Past-due aggregate (WAD)
     int256 public sPast;
-
-    /// @notice Total LP shares (WAD). Zero until M3.
-    uint256 public nLp;
 
     /// @notice Weight decay timescale (seconds)
     uint256 public lambdaW;
@@ -129,7 +132,7 @@ contract Fira {
     int256 public rho;
 
     //////////////////////////////////////////////////////////////
-    ///                     Constructor                       ///
+    ///                      Constructor                       ///
     //////////////////////////////////////////////////////////////
 
     /// @notice Nelson-Siegel term structure parameters
@@ -142,7 +145,7 @@ contract Fira {
 
     /// @notice CFMM pricing parameters
     struct CfmmParams {
-        int256 kappa; // Rate sensitivity (WAD)
+        uint256 kappa; // Rate sensitivity (WAD)
         uint256 tauMin; // Minimum time to maturity (seconds)
         uint256 tauMax; // Maximum time to maturity (seconds)
         uint256 psiMin; // Minimum utilization ratio (WAD)
@@ -160,17 +163,19 @@ contract Fira {
 
     /// @notice Constructor parameters grouped by concern
     struct ConstructorParams {
-        address cash;
-        address bond;
+        address cashToken;
+        address bondToken;
+        address lpToken;
         NSParams ns;
         CfmmParams cfmm;
         SolvencyParams solvency;
     }
 
     constructor(ConstructorParams memory p) {
-        CASH = ERC20(p.cash);
-        BOND = BondToken(p.bond);
-        CASH_DECIMALS = ERC20(p.cash).decimals();
+        CASH_TOKEN = ERC20(p.cashToken);
+        BOND_TOKEN = BondToken(p.bondToken);
+        LP_TOKEN = LpToken(p.lpToken);
+        CASH_DECIMALS = ERC20(p.cashToken).decimals();
         DECIMAL_SCALE = 10 ** (18 - CASH_DECIMALS);
 
         beta0 = p.ns.beta0;
@@ -192,7 +197,7 @@ contract Fira {
     }
 
     //////////////////////////////////////////////////////////////
-    ///                   Core Trade Functions                ///
+    ///                   Core Trade Functions                 ///
     //////////////////////////////////////////////////////////////
 
     /// @notice Execute a borrow trade (user sells bonds to pool)
@@ -209,7 +214,6 @@ contract Fira {
 
         // Execute pure CFMM swap
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
-        uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
         (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
             tau: tau, bondAmountSigned: int256(bondAmount), X: X, yWad: yPrinWad, params: _getCfmmParams()
@@ -217,11 +221,11 @@ contract Fira {
 
         // Liquidity check (borrow = cash goes out)
         uint256 cashOutWad = yPrinWad - yPrinNewWad;
-        require(yLiqWad >= cashOutWad, InsufficientYLiq());
+        uint256 cashOut = cashOutWad / DECIMAL_SCALE; // Round DOWN to protect protocol
+        require(yLiq >= cashOut, InsufficientYLiq());
 
         // State updates
         X = XNew;
-        uint256 cashOut = cashOutWad / DECIMAL_SCALE;
         yLiq -= cashOut;
         maturities[maturity].b += bondAmount;
 
@@ -229,8 +233,8 @@ contract Fira {
         _checkSolvency();
 
         // Token transfers
-        BOND.burn({from: msg.sender, maturity: maturity, amount: bondAmount});
-        CASH.transfer({to: msg.sender, amount: cashOut});
+        BOND_TOKEN.burn({from: msg.sender, maturity: maturity, amount: bondAmount});
+        CASH_TOKEN.transfer({to: msg.sender, amount: cashOut});
 
         emit Borrowed({user: msg.sender, maturity: maturity, bondAmount: bondAmount, cashNet: cashOut});
     }
@@ -254,10 +258,11 @@ contract Fira {
             tau: tau, bondAmountSigned: -int256(bondAmount), X: X, yWad: yPrinWad, params: _getCfmmParams()
         });
 
+        uint256 cashInWad = yPrinNewWad - yPrinWad;
+        uint256 cashIn = (cashInWad + DECIMAL_SCALE - 1) / DECIMAL_SCALE; // Round UP to protect protocol
+
         // State updates (lend = cash comes in, no liquidity check needed)
         X = XNew;
-        uint256 cashInWad = yPrinNewWad - yPrinWad;
-        uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
         maturities[maturity].l += bondAmount;
 
@@ -265,98 +270,149 @@ contract Fira {
         _checkSolvency();
 
         // Token transfers
-        CASH.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
-        BOND.mint({to: msg.sender, maturity: maturity, amount: bondAmount});
+        CASH_TOKEN.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
+        BOND_TOKEN.mint({to: msg.sender, maturity: maturity, amount: bondAmount});
 
         emit Lent({user: msg.sender, maturity: maturity, bondAmount: bondAmount, cashNet: cashIn});
     }
 
     //////////////////////////////////////////////////////////////
-    ///                 Settlement Functions                  ///
+    ///                 Settlement Functions                   ///
     //////////////////////////////////////////////////////////////
+
+    // FIXME: There is a vuln here where anyone can call repay which decreases maturities[maturity].b
+    //        and prevents legitimate borrowers from repaying their bonds (because maturities[maturity].b will
+    //        underflow).
+    //
+    //        This might be fixable by only allowing users with actual position in the external Collateral System to
+    //        repay. Either Fira queries the Collateral System for the user's position, or we make it so that only the
+    //        Collateral System can call repay on Fira's contract.
 
     /// @notice Repay borrowed bonds at/after maturity.
     ///
     /// @dev Settlement at τ=0 (p(0)=1). Updates b and sPast incrementally (O(1)).
     ///      Requires maturity to be expired first via expireMaturity().
-    ///      Underflows if amount > position (Solidity 0.8+ automatic check).
     ///
     /// @param maturity Maturity timestamp (seconds).
-    /// @param amount Amount to repay (native decimals).
-    function repay(uint256 maturity, uint256 amount) external {
+    /// @param bondAmount Face value of bonds to repay (WAD).
+    function repay(uint256 maturity, uint256 bondAmount) external {
         require(!_isActive({maturity: maturity}), MaturityActive());
 
-        uint256 amountWad = amount * DECIMAL_SCALE;
-
-        // Execute pure CFMM swap (settlement at tau=0)
+        // At settlement (τ=0), price = 1
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
 
-        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
-            tau: 0, bondAmountSigned: -int256(amountWad), X: X, yWad: yPrinWad, params: _getCfmmParams()
+        uint256 XNew = CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: -int256(bondAmount), X: X, yWad: yPrinWad, psiMin: psiMin, psiMax: psiMax
         });
+
+        uint256 cashIn = (bondAmount + DECIMAL_SCALE - 1) / DECIMAL_SCALE; // Round UP to protect protocol
 
         // State updates (repay = cash comes in, no liquidity check needed)
         X = XNew;
-        uint256 cashInWad = yPrinNewWad - yPrinWad;
-        uint256 cashIn = cashInWad / DECIMAL_SCALE;
         yLiq += cashIn;
-        maturities[maturity].b -= amountWad; // Reverts if maturity does not exist
-        sPast -= int256(amountWad);
+        maturities[maturity].b -= bondAmount; // Reverts if maturity does not exist
+        sPast -= int256(bondAmount);
 
         // Solvency check
         _checkSolvency();
 
         // Token transfers
-        CASH.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
-        BOND.mint({to: msg.sender, maturity: maturity, amount: amountWad});
+        CASH_TOKEN.transferFrom({from: msg.sender, to: address(this), amount: cashIn});
+        BOND_TOKEN.mint({to: msg.sender, maturity: maturity, amount: bondAmount});
 
-        emit Repaid({user: msg.sender, maturity: maturity, amount: amount});
+        emit Repaid({user: msg.sender, maturity: maturity, bondAmount: bondAmount});
     }
 
     /// @notice Redeem lent bonds at/after maturity.
     ///
     /// @dev Settlement at τ=0 (p(0)=1). Updates l and sPast incrementally (O(1)).
     ///      Requires maturity to be expired first via expireMaturity().
-    ///      Underflows if amount > position (Solidity 0.8+ automatic check).
     ///
     /// @param maturity Maturity timestamp (seconds).
-    /// @param amount Amount to redeem (native decimals).
-    function redeem(uint256 maturity, uint256 amount) external {
+    /// @param bondAmount Face value of bonds to redeem (WAD).
+    function redeem(uint256 maturity, uint256 bondAmount) external {
         require(!_isActive({maturity: maturity}), MaturityActive());
 
-        uint256 amountWad = amount * DECIMAL_SCALE;
-
-        // Execute pure CFMM swap (settlement at tau=0)
+        // At settlement (τ=0), price = 1
         uint256 yPrinWad = (yLiq + yVault) * DECIMAL_SCALE;
-        uint256 yLiqWad = yLiq * DECIMAL_SCALE;
 
-        (uint256 XNew, uint256 yPrinNewWad) = CfmmMathLib.computeSwap({
-            tau: 0, bondAmountSigned: int256(amountWad), X: X, yWad: yPrinWad, params: _getCfmmParams()
+        uint256 XNew = CfmmMathLib.computeSwapAtSettlement({
+            bondAmountSigned: int256(bondAmount), X: X, yWad: yPrinWad, psiMin: psiMin, psiMax: psiMax
         });
 
         // Liquidity check (redeem = cash goes out)
-        uint256 cashOutWad = yPrinWad - yPrinNewWad;
-        require(yLiqWad >= cashOutWad, InsufficientYLiq());
+        uint256 cashOut = bondAmount / DECIMAL_SCALE; // Round DOWN to protect protocol
+        require(yLiq >= cashOut, InsufficientYLiq());
 
         // State updates
         X = XNew;
-        uint256 cashOut = cashOutWad / DECIMAL_SCALE;
         yLiq -= cashOut;
-        maturities[maturity].l -= amountWad; // Reverts if maturity does not exist
-        sPast += int256(amountWad);
+        maturities[maturity].l -= bondAmount; // Reverts if maturity does not exist
+        sPast += int256(bondAmount);
 
         // Solvency check
         _checkSolvency();
 
         // Token transfers
-        BOND.burn({from: msg.sender, maturity: maturity, amount: amountWad});
-        CASH.transfer({to: msg.sender, amount: cashOut});
+        BOND_TOKEN.burn({from: msg.sender, maturity: maturity, amount: bondAmount});
+        CASH_TOKEN.transfer({to: msg.sender, amount: cashOut});
 
-        emit Redeemed({user: msg.sender, maturity: maturity, amount: amount});
+        emit Redeemed({user: msg.sender, maturity: maturity, bondAmount: bondAmount});
     }
 
     //////////////////////////////////////////////////////////////
-    ///            Maturity Linked-List Management            ///
+    ///                    LP Functions                        ///
+    //////////////////////////////////////////////////////////////
+
+    /// @notice Deposit cash to receive LP tokens.
+    ///
+    /// @dev Off-curve operation: scales (X, yPrin) to preserve psi (utilization ratio ψ = X / yPrin).
+    ///      Bootstrap (LP_TOKEN.totalSupply() = 0): mints 1:1 shares, sets X = yPrin (psi = 1).
+    ///      Mints LpToken ERC20 to the depositor.
+    ///
+    /// @param amount Amount of cash to deposit (native decimals).
+    function deposit(uint256 amount) external {
+        require(amount > 0, ZeroDeposit());
+
+        // Compute sum of (b - l) over active maturities
+        int256 sumBucketNet;
+        {
+            uint256 current = head;
+            while (current != 0) {
+                sumBucketNet += int256(maturities[current].b) - int256(maturities[current].l);
+                current = maturities[current].next;
+            }
+        }
+
+        // Compute deposit
+        uint256 yPrinOldWad = (yLiq + yVault) * DECIMAL_SCALE;
+        (uint256 sharesToMint, uint256 XNew) = LpLib.computeDeposit({
+            enom: LpLib.EnomParams({
+                yLiqWad: yLiq * DECIMAL_SCALE,
+                yPnlWad: yPnl * DECIMAL_SCALE,
+                yVaultWad: yVault * DECIMAL_SCALE,
+                sPast: sPast,
+                sumBucketNet: sumBucketNet
+            }),
+            X: X,
+            nLp: LP_TOKEN.totalSupply(),
+            depositWad: amount * DECIMAL_SCALE,
+            yPrinOldWad: yPrinOldWad
+        });
+
+        // State updates
+        yLiq += amount;
+        X = XNew;
+
+        // Interactions
+        CASH_TOKEN.transferFrom({from: msg.sender, to: address(this), amount: amount});
+        LP_TOKEN.mint({to: msg.sender, amount: sharesToMint});
+
+        emit Deposited({user: msg.sender, amount: amount, shares: sharesToMint});
+    }
+
+    //////////////////////////////////////////////////////////////
+    ///            Maturity Linked-List Management             ///
     //////////////////////////////////////////////////////////////
 
     /// @notice Add a new maturity to the active list
@@ -432,7 +488,7 @@ contract Fira {
     }
 
     //////////////////////////////////////////////////////////////
-    ///                 Internal Helpers                      ///
+    ///                 Internal Helpers                       ///
     //////////////////////////////////////////////////////////////
 
     /// @notice Get CFMM parameters for pure computation
@@ -472,7 +528,7 @@ contract Fira {
             wVault: wVault,
             sPast: sPast
         });
-        int256 minERisk = eRisk;
+        int256 minErisk = eRisk;
 
         // 2. Iterate over maturities (sorted by tau ascending)
         uint256 current = head;
@@ -484,13 +540,13 @@ contract Fira {
             });
 
             eRisk += net;
-            if (eRisk < minERisk) minERisk = eRisk;
+            if (eRisk < minErisk) minErisk = eRisk;
 
             current = node.next;
         }
 
         // 3. Check floor
-        SolvencyLib.checkFloor({minERisk: minERisk, rho: rho, nLp: nLp});
+        SolvencyLib.checkFloor({minErisk: minErisk, rho: rho, nLp: LP_TOKEN.totalSupply()});
     }
 
     /// @notice Check if a maturity is in the active linked list.

@@ -35,15 +35,17 @@ library NelsonSiegelLib {
         // f1(0) = 1, f2(0) = 0 → r* = β₀ + β₁
         if (tau == 0) return beta0 + beta1;
 
-        // casting to 'int256' is safe because tau < 100 years and lambda bounded by MAX_LAMBDA
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // tauOverLambda = τ / λ
         int256 tauOverLambda = FixedPointMathLib.sDivWad({x: int256(tau), y: int256(lambda)});
+        // expNeg = e^(-τ/λ)
         int256 expNeg = FixedPointMathLib.expWad({x: -tauOverLambda});
 
+        // f1 = (1 - e^(-τ/λ)) / (τ/λ)
         int256 f1 = tauOverLambda < sWad / 100
             ? sWad - tauOverLambda / 2
             : FixedPointMathLib.sDivWad({x: sWad - expNeg, y: tauOverLambda});
 
+        // f
         int256 f2 = f1 - expNeg;
 
         return beta0 + FixedPointMathLib.sMulWad({x: beta1, y: f1}) + FixedPointMathLib.sMulWad({x: beta2, y: f2});

@@ -6,6 +6,7 @@ import {ERC1155} from "solady/tokens/ERC1155.sol";
 /// @title BondToken - Multi-Maturity Bond Token
 ///
 /// @notice ERC1155 token representing bonds with different maturities.
+///
 /// @dev tokenId = maturity timestamp. Only the minter (AMM) can mint/burn.
 contract BondToken is ERC1155 {
     //////////////////////////////////////////////////////////////
@@ -63,21 +64,6 @@ contract BondToken is ERC1155 {
     }
 
     //////////////////////////////////////////////////////////////
-    ///                       Modifiers                        ///
-    //////////////////////////////////////////////////////////////
-
-    /// @dev Restricts function access to the minter only.
-    modifier onlyMinter() {
-        _checkMinter();
-        _;
-    }
-
-    /// @dev Internal function to check minter authorization.
-    function _checkMinter() internal view {
-        require(msg.sender == MINTER, Unauthorized());
-    }
-
-    //////////////////////////////////////////////////////////////
     ///                    Public Functions                    ///
     //////////////////////////////////////////////////////////////
 
@@ -86,7 +72,8 @@ contract BondToken is ERC1155 {
     /// @param to The recipient address.
     /// @param maturity The maturity timestamp (tokenId).
     /// @param amount The amount to mint.
-    function mint(address to, uint256 maturity, uint256 amount) external onlyMinter {
+    function mint(address to, uint256 maturity, uint256 amount) external {
+        require(msg.sender == MINTER, Unauthorized());
         _mint({to: to, id: maturity, amount: amount, data: ""});
         _totalSupply[maturity] += amount;
 
@@ -98,7 +85,8 @@ contract BondToken is ERC1155 {
     /// @param from The address to burn from.
     /// @param maturity The maturity timestamp (tokenId).
     /// @param amount The amount to burn.
-    function burn(address from, uint256 maturity, uint256 amount) external onlyMinter {
+    function burn(address from, uint256 maturity, uint256 amount) external {
+        require(msg.sender == MINTER, Unauthorized());
         _burn({from: from, id: maturity, amount: amount});
         _totalSupply[maturity] -= amount;
 

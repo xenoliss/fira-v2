@@ -208,43 +208,46 @@ contract SolvencyLibTest is Test {
     ///                   checkFloor Tests                     ///
     //////////////////////////////////////////////////////////////
 
-    /// @dev Passing case: minERisk > floor.
-    function test_checkFloor_passesAboveFloor() public pure {
-        // floor = 0.1e18 * 1000e18 / 1e18 = 100e18
-        // minERisk = 150e18 > 100e18 → passes
-        SolvencyLib.checkFloor({minERisk: 150e18, rho: 0.1e18, nLp: 1000e18});
+    /// @dev checkFloor should pass when minErisk >= floor.
+    function testFuzz_checkFloor_passesWhenAboveOrAtFloor(uint256 nLp, uint256 rho, uint256 margin) public pure {
+        // Bounds: realistic values
+        nLp = bound(nLp, 0, 1e36); // 0 to 1e18 tokens
+        rho = bound(rho, 0, 1e18); // 0% to 100%
+        margin = bound(margin, 0, 1e36); // margin above floor
+
+        int256 floor = int256(rho) * int256(nLp) / 1e18;
+        int256 minErisk = floor + int256(margin);
+
+        // Should never revert
+        SolvencyLib.checkFloor({minErisk: minErisk, rho: int256(rho), nLp: nLp});
     }
 
-    /// @dev Passing case: minERisk == floor (equality).
-    function test_checkFloor_passesAtFloor() public pure {
-        // floor = 1e18 * 500e18 / 1e18 = 500e18
-        // minERisk = 500e18 == 500e18 → passes
-        SolvencyLib.checkFloor({minERisk: 500e18, rho: 1e18, nLp: 500e18});
+    /// @dev checkFloor should always pass when rho=0 (floor=0).
+    function testFuzz_checkFloor_zeroRhoAlwaysPasses(uint256 nLp, uint256 minEriskUint) public pure {
+        nLp = bound(nLp, 0, 1e36);
+        minEriskUint = bound(minEriskUint, 0, 1e36);
+        int256 minErisk = int256(minEriskUint);
+
+        // floor = 0, any minErisk >= 0 passes
+        SolvencyLib.checkFloor({minErisk: minErisk, rho: 0, nLp: nLp});
     }
 
-    /// @dev Reverting case: minERisk < floor.
+    /// @dev Reverting case: minErisk < floor.
     /// forge-config: default.allow_internal_expect_revert = true
     function testRevert_checkFloor_belowFloor() public {
         // floor = 0.5e18 * 1000e18 / 1e18 = 500e18
-        // minERisk = 499e18 < 500e18 → reverts
+        // minErisk = 499e18 < 500e18 → reverts
         vm.expectRevert(SolvencyLib.SolvencyFloorViolated.selector);
-        SolvencyLib.checkFloor({minERisk: 499e18, rho: 0.5e18, nLp: 1000e18});
+        SolvencyLib.checkFloor({minErisk: 499e18, rho: 0.5e18, nLp: 1000e18});
     }
 
-    /// @dev Reverting case: negative minERisk.
+    /// @dev Reverting case: negative minErisk.
     /// forge-config: default.allow_internal_expect_revert = true
-    function testRevert_checkFloor_negativeMinERisk() public {
+    function testRevert_checkFloor_negativeMinErisk() public {
         // floor = 0.1e18 * 1000e18 / 1e18 = 100e18
-        // minERisk = -50e18 < 100e18 → reverts
+        // minErisk = -50e18 < 100e18 → reverts
         vm.expectRevert(SolvencyLib.SolvencyFloorViolated.selector);
-        SolvencyLib.checkFloor({minERisk: -50e18, rho: 0.1e18, nLp: 1000e18});
-    }
-
-    /// @dev Passing case: rho = 0 means floor = 0, any positive minERisk passes.
-    function test_checkFloor_zeroRho_alwaysPasses() public pure {
-        // floor = 0 * 1000e18 / 1e18 = 0
-        // minERisk = 1 >= 0 → passes
-        SolvencyLib.checkFloor({minERisk: 1, rho: 0, nLp: 1000e18});
+        SolvencyLib.checkFloor({minErisk: -50e18, rho: 0.1e18, nLp: 1000e18});
     }
 
     //////////////////////////////////////////////////////////////
